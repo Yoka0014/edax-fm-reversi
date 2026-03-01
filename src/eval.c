@@ -6,6 +6,11 @@
  * @date 1998 - 2024
  * @author Richard Delorme
  * @version 4.6
+ *
+ * Modified 2025 - 2026 by Yuichiro Okashita
+ * Changes: Augmented the linear evaluation model with Factorization Machine
+ *          (FM) second-order interaction terms to capture pairwise feature
+ *          interactions.
  */
 
 #include "eval.h"
@@ -468,11 +473,33 @@ static const uint32_t FEATURE_OFFSET[] = {
 	29484, 29485
 };
 
-/** Evaluation weights by color & ply */
-static int16_t *EVAL_WEIGHT[65][2];
+/** per-location feature offset */
+static const uint32_t LATENT_VECTOR_OFFSET[] = {
+	      0,  19683,  39366,  59049,
+	  78732, 137781, 196830, 255879,
+	 314928, 373977, 433026, 492075,
+	 551124, 610173, 669222, 728271,
+	 787320, 793881, 800442, 807003,
+	 813564, 820125, 826686, 833247,
+	 839808, 846369, 852930, 859491,
+	 866052, 872613,
+	 879174, 881361, 883548, 885735,
+	 887922, 888651, 889380, 890109,
+	 890838, 891081, 891324, 891567,
+	 891810, 891891, 891972, 892053
+};
 
 /** number of (unpacked) weights */
 static const uint32_t EVAL_N_WEIGHT = 226315;
+
+/** dimension of a latent vector */
+#define EVAL_LATENT_VECTOR_DIM 32  // defined as a macro to allow use in preprocessor directives
+
+/** number of latent vectors */
+static const uint32_t EVAL_N_LATENT_VECTOR = 892134;
+
+/** quantization scale of latent vectors */
+static const uint32_t EVAL_QUANT_SCALE_LATENT_VECTOR = 128;
 
 /** number of plies */
 static const uint32_t EVAL_N_PLY = 61;
@@ -486,6 +513,11 @@ static int EVAL_LOADED = 0;
 /** evaluation function error coefficient parameters */
 static double EVAL_A, EVAL_B, EVAL_C, EVAL_a, EVAL_b, EVAL_c;
 
+/** Evaluation weights by color & ply */
+static int16_t *EVAL_WEIGHT[65][2];
+
+/** Latent vectors by color */
+static int8_t *EVAL_LATENT_VECTOR[2];
 
 /**
  * @brief Opponent feature.
@@ -719,6 +751,28 @@ void eval_open(const char* file)
 		EVAL_WEIGHT[ply][1][j + 1] = 0;
 	}
 
+    // Latent vectors
+    EVAL_LATENT_VECTOR[0] = (int8_t*)malloc(EVAL_N_LATENT_VECTOR * EVAL_LATENT_VECTOR_DIM);
+    EVAL_LATENT_VECTOR[1] = (int8_t*)malloc(EVAL_N_LATENT_VECTOR * EVAL_LATENT_VECTOR_DIM);
+
+    r = fread(EVAL_LATENT_VECTOR[0], EVAL_LATENT_VECTOR_DIM, EVAL_N_LATENT_VECTOR, f);
+
+    if (r != EVAL_N_LATENT_VECTOR) fatal_error("Cannot read latent vectors from %s\n", file);
+
+    uint32_t power3[] = {1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683, 59049 };
+    for(int32_t i = 0; i < EVAL_N_FEATURE - 1; i++)
+	{
+		uint32_t offset = LATENT_VECTOR_OFFSET[i] * EVAL_LATENT_VECTOR_DIM;
+		uint32_t size = EVAL_F2X[i].n_square;
+		uint32_t feature_max = power3[size];
+		for(uint32_t feature = 0; feature < feature_max; feature++)
+			memcpy(
+				EVAL_LATENT_VECTOR[1] + offset + feature * EVAL_LATENT_VECTOR_DIM,
+				EVAL_LATENT_VECTOR[0] + offset + opponent_feature(feature, size) * EVAL_LATENT_VECTOR_DIM,
+				EVAL_LATENT_VECTOR_DIM
+			);
+	}
+
 	fclose(f);
 	free(w);
 	free_pack(EVAL_C10);
@@ -744,6 +798,8 @@ void eval_open(const char* file)
 void eval_close(void)
 {
 	free(EVAL_WEIGHT[0][0] - 1);
+	free(EVAL_LATENT_VECTOR[0]);
+	free(EVAL_LATENT_VECTOR[1]);
 	EVAL_LOADED = 0;
 }
 
@@ -1041,61 +1097,27 @@ void eval_pass(Eval *eval)
 	eval_swap(eval);
 }
 
+#if USE_SIMD && (defined(__AVX2__) || (defined(__AVX512F__) && defined(__AVX512BW__)))
+int32_t hsum_epi32(__m256i v)
+{
+    __m128i v_low = _mm256_castsi256_si128(v);
+    __m128i v_high = _mm256_extracti128_si256(v, 1);
+    __m128i v128 = _mm_add_epi32(v_low, v_high);
+    v128 = _mm_hadd_epi32(v128, v128);
+    v128 = _mm_hadd_epi32(v128, v128);
+    return _mm_cvtsi128_si32(v128);
+}
+#endif
+
 /**
- * @brief raw addition of the feature weights
+ * @brief Accumulate linear feature weights and FM second-order interaction
+ *        terms into an unscaled sum.
  *
- * @param eval the evaluation data;
- * @param player;
- * @param ply;
+ * @param eval Evaluation data.
+ * @return Unscaled accumulated sum, to be further processed into an evaluation score.
  */
-int eval_accumulate(const Eval *eval) {
-
-// the vectorised version is ~10% slower than the standard version below on zen3, so I (Richard Delorme) disabled it.
-#if 0 && USE_SIMD && defined(__AVX2__)
-
-	int *w_0 = (int*) EVAL_WEIGHT[eval->ply][eval->player];
-	int *w_1 = (int*) (EVAL_WEIGHT[eval->ply][eval->player] + WEIGHT_OFFSET[4] - 1);
-	const __m128i *f = eval->feature[eval->ply].v8;
-	const __m256i o[] = {
-		_mm256_set_epi32( 19682,  19682,  19682,  19682,     -1,     -1,     -1,     -1),
-		_mm256_set_epi32(137780, 137780, 137780, 137780,  78731,  78731,  78731,  78731),
-	};
-	__m256i f8, fo, w8, s8;
-	__m128i s4, s2;
-	int32_t sum;
-
-	f8 = _mm256_cvtepu16_epi32(f[0]); // dispatch the 8 int16_t into 8 int32_t inside f8 : f8  = [feature.v1[7] | feature.v1[6]  ... | feature v1[0]]
- 	fo = _mm256_add_epi32(f8, o[0]); //	add f8 + o8
-	w8 = _mm256_i32gather_epi32(w_0, fo, 2); // w8 = | w[f8+offset] | ...
-	s8 = _mm256_srai_epi32(w8, 16);	// shift to the right by a short
-
-	f8 = _mm256_cvtepu16_epi32(f[1]); // repeat
- 	fo = _mm256_add_epi32(f8, o[1]);
-	w8 = _mm256_i32gather_epi32(w_0, fo, 2);
-	s8 = _mm256_add_epi32(s8, _mm256_srai_epi32(w8, 16));
-
-	f8 = _mm256_cvtepu16_epi32(f[2]); // the offset is included in the feature (within 16 bit)
-	w8 = _mm256_i32gather_epi32(w_1, f8, 2);
-	s8 = _mm256_add_epi32(s8, _mm256_srai_epi32(w8, 16));
-
-	f8 = _mm256_cvtepu16_epi32(f[3]);
-	w8 = _mm256_i32gather_epi32(w_1, f8, 2);
-	s8 = _mm256_add_epi32(s8, _mm256_srai_epi32(w8, 16));
-
-	f8 = _mm256_cvtepu16_epi32(f[4]);
-	w8 = _mm256_i32gather_epi32(w_1, f8, 2);
-	s8 = _mm256_add_epi32(s8, _mm256_srai_epi32(w8, 16));
-
-	f8 = _mm256_cvtepu16_epi32(f[5]);
-	w8 = _mm256_i32gather_epi32(w_1, f8, 2);
-	s8 = _mm256_add_epi32(s8, _mm256_srai_epi32(w8, 16));
-
-	s4 = _mm_add_epi32(_mm256_castsi256_si128(s8), _mm256_extracti128_si256(s8, 1));
-	s2 = _mm_hadd_epi32(s4, s4);
-	sum = _mm_cvtsi128_si32(s2) + _mm_extract_epi32(s2, 1);
-
-#else
-
+int eval_accumulate(const Eval *eval) 
+{
 	const uint32_t *o = WEIGHT_OFFSET;
 	const int16_t *w0 = EVAL_WEIGHT[eval->ply][eval->player];
 	const int16_t *w1 = w0 + o[1], *w2 = w0 + o[2], *w3 = w0 + o[3], *w4 = w0 + o[4];
@@ -1116,9 +1138,176 @@ int eval_accumulate(const Eval *eval) {
 	    + w4[f[42]] + w4[f[43]] + w4[f[44]] + w4[f[45]]
 	    + w4[f[46]];
 
+    // FM interaction term
+    const int8_t* latent_vector = EVAL_LATENT_VECTOR[eval->player];
+	int64_t interaction = 0;
+
+#if USE_SIMD && defined(__AVX512F__) && defined(__AVX512BW__) && EVAL_LATENT_VECTOR_DIM >= 32
+    const int32_t CHUNK_SIZE = 32;
+    const int32_t NUM_CHUNKS = EVAL_LATENT_VECTOR_DIM / CHUNK_SIZE;
+    const int32_t REMAINDER = EVAL_LATENT_VECTOR_DIM % CHUNK_SIZE;
+
+    __m512i sum_acc[NUM_CHUNKS > 0 ? NUM_CHUNKS : 1];
+    __m512i sq_sum_acc[NUM_CHUNKS > 0 ? NUM_CHUNKS : 1];
+
+    for(int32_t i = 0; i < NUM_CHUNKS; i++){
+        sum_acc[i] = _mm512_setzero_si512();
+        sq_sum_acc[i] = _mm512_setzero_si512();
+    }
+
+    int32_t rem_sum[REMAINDER > 0 ? REMAINDER : 1];
+    int32_t rem_sq_sum[REMAINDER > 0 ? REMAINDER : 1];
+
+    for(int32_t j = 0; j < REMAINDER; j++){
+        rem_sum[j] = 0;
+        rem_sq_sum[j] = 0;
+    }
+
+    for(int32_t i = 0; i < EVAL_N_FEATURE - 1; i++){
+        uint16_t feature = f[i] - FEATURE_OFFSET[i];
+        const int8_t* lv = latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM;
+        
+        for(int32_t j = 0; j < NUM_CHUNKS; j++){
+            const __m256i v256 = _mm256_loadu_si256((const __m256i*)(lv + j * 32));
+            const __m512i v512 = _mm512_cvtepi8_epi16(v256);
+
+            sum_acc[j] = _mm512_add_epi16(sum_acc[j], v512);
+
+            const __m512i sq_pair = _mm512_madd_epi16(v512, v512);
+            sq_sum_acc[j] = _mm512_add_epi32(sq_sum_acc[j], sq_pair);
+        }
+
+        for(int32_t j = 0; j < REMAINDER; j++){
+            int8_t val = lv[NUM_CHUNKS * 32 + j];
+            rem_sum[j] += val;
+            rem_sq_sum[j] += val * val;
+        }
+    }
+
+    int32_t sum_sq = 0;
+    int32_t sq_sum = 0;
+    for(int32_t i = 0; i < NUM_CHUNKS; i++)
+    {
+        __m256i sq_sum_acc_lo = _mm512_castsi512_si256(sq_sum_acc[i]);
+        __m256i sq_sum_acc_hi = _mm512_extracti64x4_epi64(sq_sum_acc[i], 1);
+        sq_sum += hsum_epi32(sq_sum_acc_lo) + hsum_epi32(sq_sum_acc_hi);
+
+        __m256i sum_raw_lo = _mm512_castsi512_si256(sum_acc[i]);
+        __m256i sum_raw_hi = _mm512_extracti64x4_epi64(sum_acc[i], 1);
+
+        __m512i sum_val_lo = _mm512_cvtepi16_epi32(sum_raw_lo);
+        __m512i sum_sq_lo = _mm512_mullo_epi32(sum_val_lo, sum_val_lo);
+
+        __m512i sum_val_hi = _mm512_cvtepi16_epi32(sum_raw_hi);
+        __m512i sum_sq_hi = _mm512_mullo_epi32(sum_val_hi, sum_val_hi);
+
+        __m256i v_lo_256 = _mm512_castsi512_si256(sum_sq_lo);
+        __m256i v_hi_256 = _mm512_extracti64x4_epi64(sum_sq_lo, 1);
+        sum_sq += hsum_epi32(v_lo_256) + hsum_epi32(v_hi_256);
+
+        v_lo_256 = _mm512_castsi512_si256(sum_sq_hi);
+        v_hi_256 = _mm512_extracti64x4_epi64(sum_sq_hi, 1);
+        sum_sq += hsum_epi32(v_lo_256) + hsum_epi32(v_hi_256);
+    }
+
+    for(int32_t i = 0; i < REMAINDER; i++){
+        sum_sq += rem_sum[i] * rem_sum[i];
+        sq_sum += rem_sq_sum[i];
+    }
+
+    interaction = sum_sq - sq_sum;
+#elif USE_SIMD && defined __AVX2__ && EVAL_LATENT_VECTOR_DIM >= 16
+    const int32_t CHUNK_SIZE = 16;
+	const int32_t NUM_CHUNKS = EVAL_LATENT_VECTOR_DIM / CHUNK_SIZE;
+	const int32_t REMAINDER = EVAL_LATENT_VECTOR_DIM % CHUNK_SIZE;
+
+	__m256i sum_acc[NUM_CHUNKS > 0 ? NUM_CHUNKS : 1];
+	__m256i sq_sum_acc[NUM_CHUNKS > 0 ? NUM_CHUNKS : 1];
+
+	for(int32_t i = 0; i < NUM_CHUNKS; i++)
+	{
+		sum_acc[i] = _mm256_setzero_si256();
+		sq_sum_acc[i] = _mm256_setzero_si256();
+	}
+
+	int32_t rem_sum[REMAINDER > 0 ? REMAINDER : 1];
+	int32_t rem_sq_sum[REMAINDER > 0 ? REMAINDER : 1];
+
+	for(int32_t j = 0; j < REMAINDER; j++)
+	{
+		rem_sum[j] = 0;
+		rem_sq_sum[j] = 0;
+	}
+
+	for(int32_t i = 0; i < EVAL_N_FEATURE - 1; i++){
+		uint16_t feature = f[i] - FEATURE_OFFSET[i];
+		const int8_t* lv = latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM;
+
+		for(int32_t j = 0; j < NUM_CHUNKS; j++){
+			const __m128i v8 = _mm_loadu_si128((const __m128i*)(lv + j * CHUNK_SIZE));
+			const __m256i v16 = _mm256_cvtepi8_epi16(v8);
+
+			sum_acc[j] = _mm256_add_epi16(sum_acc[j], v16);
+
+			const __m256i sq_pair = _mm256_madd_epi16(v16, v16);
+			sq_sum_acc[j] = _mm256_add_epi32(sq_sum_acc[j], sq_pair);
+		}
+
+		for(int32_t j = 0; j < REMAINDER; j++){
+			int8_t v = lv[NUM_CHUNKS * CHUNK_SIZE + j];
+			rem_sum[j] += v;
+			rem_sq_sum[j] += v * v;
+		}
+	}
+
+    int32_t sum_sq = 0, sq_sum = 0;
+	for(int32_t i = 0; i < NUM_CHUNKS; i++){
+		const __m256i sum_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(sum_acc[i]));
+		const __m256i sum_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(sum_acc[i], 1));
+
+		const __m256i sum_sq_lo = _mm256_mullo_epi32(sum_lo, sum_lo);
+		const __m256i sum_sq_hi = _mm256_mullo_epi32(sum_hi, sum_hi);
+
+		sum_sq += hsum_epi32(sum_sq_lo) + hsum_epi32(sum_sq_hi);
+		sq_sum += hsum_epi32(sq_sum_acc[i]);
+	}
+
+	for(int32_t i = 0; i < REMAINDER; i++){
+		sum_sq += rem_sum[i] * rem_sum[i];
+		sq_sum += rem_sq_sum[i];
+	}
+
+	interaction = sum_sq - sq_sum;
+#else
+    int32_t sum_acc[EVAL_LATENT_VECTOR_DIM];
+    int32_t sq_sum_acc[EVAL_LATENT_VECTOR_DIM];
+
+	for(int32_t i = 0; i < EVAL_LATENT_VECTOR_DIM; i++){
+		sum_acc[i] = 0;
+		sq_sum_acc[i] = 0;
+	}
+
+	for(int32_t i = 0; i < EVAL_N_FEATURE - 1; i++){
+		uint16_t feature = f[i] - FEATURE_OFFSET[i];
+		const int8_t* lv = latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM;
+		for(int32_t j = 0; j < EVAL_LATENT_VECTOR_DIM; j++){
+			sum_acc[j] += lv[j];
+			sq_sum_acc[j] += lv[j] * lv[j];
+		}
+	}
+
+    int32_t sum_sq = 0, sq_sum = 0;
+	for(int32_t i = 0; i < EVAL_LATENT_VECTOR_DIM; i++){
+		sum_sq += sum_acc[i] * sum_acc[i];
+		sq_sum += sq_sum_acc[i];
+	}
+
+	interaction = sum_sq - sq_sum;
 #endif
 
-	return sum;
+    interaction *= 128;
+    interaction /= (EVAL_QUANT_SCALE_LATENT_VECTOR * EVAL_QUANT_SCALE_LATENT_VECTOR * 2);
+	return sum + interaction;
 }
 
 
