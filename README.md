@@ -13,13 +13,17 @@ Its main features are:
 
 ## Evaluation function
 
-Let $N$ denote the number of board features, $K$ the latent vector dimension, $q_s$ the quantization scale factor, $v_{i,k} \in \mathbb{Z}$ the quantized (int8) latent vector component for feature $i$ and dimension $k$, and $\tilde{v}_{i,k} = v_{i,k} / q_s$ the corresponding dequantized value.
+Let $N$ denote the number of board features, $K$ the latent vector dimension, $v_{i,k} \in \mathbb{Z}$ the quantized (int8) latent vector component for feature $i$ and dimension $k$, and $q_s$ the quantization scale factor.
 
 The evaluation score is:
 
 $$\text{score} = \mathbf{w} \cdot \mathbf{x} + \frac{128}{2 q_s^2} \sum_{k=1}^{K} \left[ \left( \sum_{i=1}^{N} v_{i,k} \right)^2 - \sum_{i=1}^{N} v_{i,k}^2 \right]$$
 
-The bracketed term is the standard FM second-order interaction, computed efficiently as `sum_sq - sq_sum`. The prefactor $128 / (2 q_s^2)$ dequantizes the result, making the expression equivalent to
+The bracketed term is the standard FM second-order interaction. The prefactor $128 / (2 q_s^2)$ dequantizes the result. Defining the dequantized latent vector as
+
+$$\tilde{v}_{i,k} = \frac{v_{i,k}}{q_s},$$
+
+the expression above is equivalent to
 
 $$\mathbf{w} \cdot \mathbf{x} + \frac{1}{2} \sum_{k=1}^{K} \left[ \left( \sum_{i=1}^{N} \tilde{v}_{i,k} \right)^2 - \sum_{i=1}^{N} \tilde{v}_{i,k}^2 \right]$$
 
