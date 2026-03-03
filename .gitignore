@@ -7,6 +7,7 @@ doc/
 *.7z
 
 .DS_Store
+compile_flags.txt
 =======
 *.o
 *.s

@@ -21,6 +21,7 @@
 #include "move.h"
 #include "util.h"
 
+#include <immintrin.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
@@ -751,9 +752,17 @@ void eval_open(const char* file)
 		EVAL_WEIGHT[ply][1][j + 1] = 0;
 	}
 
-    // Latent vectors
+    // Load latent vectors
+#if USE_SIMD && defined(__AVX512F__) && defined(__AVX512BW__) && EVAL_LATENT_VECTOR_DIM % 32 == 0
+    EVAL_LATENT_VECTOR[0] = (int8_t*)aligned_alloc(64, EVAL_N_LATENT_VECTOR * EVAL_LATENT_VECTOR_DIM);
+    EVAL_LATENT_VECTOR[1] = (int8_t*)aligned_alloc(64, EVAL_N_LATENT_VECTOR * EVAL_LATENT_VECTOR_DIM);
+#elif USE_SIMD && defined __AVX2__ && EVAL_LATENT_VECTOR_DIM % 16 == 0
+    EVAL_LATENT_VECTOR[0] = (int8_t*)aligned_alloc(32, EVAL_N_LATENT_VECTOR * EVAL_LATENT_VECTOR_DIM);
+    EVAL_LATENT_VECTOR[1] = (int8_t*)aligned_alloc(32, EVAL_N_LATENT_VECTOR * EVAL_LATENT_VECTOR_DIM);
+#else
     EVAL_LATENT_VECTOR[0] = (int8_t*)malloc(EVAL_N_LATENT_VECTOR * EVAL_LATENT_VECTOR_DIM);
     EVAL_LATENT_VECTOR[1] = (int8_t*)malloc(EVAL_N_LATENT_VECTOR * EVAL_LATENT_VECTOR_DIM);
+#endif
 
     r = fread(EVAL_LATENT_VECTOR[0], EVAL_LATENT_VECTOR_DIM, EVAL_N_LATENT_VECTOR, f);
 
@@ -1142,45 +1151,29 @@ int eval_accumulate(const Eval *eval)
     const int8_t* latent_vector = EVAL_LATENT_VECTOR[eval->player];
 	int64_t interaction = 0;
 
-#if USE_SIMD && defined(__AVX512F__) && defined(__AVX512BW__) && EVAL_LATENT_VECTOR_DIM >= 32
+#if USE_SIMD && defined(__AVX512F__) && defined(__AVX512BW__) && EVAL_LATENT_VECTOR_DIM % 32 == 0
     const int32_t CHUNK_SIZE = 32;
     const int32_t NUM_CHUNKS = EVAL_LATENT_VECTOR_DIM / CHUNK_SIZE;
-    const int32_t REMAINDER = EVAL_LATENT_VECTOR_DIM % CHUNK_SIZE;
 
-    __m512i sum_acc[NUM_CHUNKS > 0 ? NUM_CHUNKS : 1];
-    __m512i sq_sum_acc[NUM_CHUNKS > 0 ? NUM_CHUNKS : 1];
+    __m512i sum_acc[NUM_CHUNKS];
+    __m512i sq_sum_acc[NUM_CHUNKS];
 
     for(int32_t i = 0; i < NUM_CHUNKS; i++){
         sum_acc[i] = _mm512_setzero_si512();
         sq_sum_acc[i] = _mm512_setzero_si512();
     }
 
-    int32_t rem_sum[REMAINDER > 0 ? REMAINDER : 1];
-    int32_t rem_sq_sum[REMAINDER > 0 ? REMAINDER : 1];
-
-    for(int32_t j = 0; j < REMAINDER; j++){
-        rem_sum[j] = 0;
-        rem_sq_sum[j] = 0;
-    }
-
     for(int32_t i = 0; i < EVAL_N_FEATURE - 1; i++){
         uint16_t feature = f[i] - FEATURE_OFFSET[i];
-        const int8_t* lv = latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM;
+        const __m256i* lv_8 = (const __m256i*)(latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM);
         
         for(int32_t j = 0; j < NUM_CHUNKS; j++){
-            const __m256i v256 = _mm256_loadu_si256((const __m256i*)(lv + j * 32));
-            const __m512i v512 = _mm512_cvtepi8_epi16(v256);
+            const __m512i lv_16 = _mm512_cvtepi8_epi16(lv_8[j]);
 
-            sum_acc[j] = _mm512_add_epi16(sum_acc[j], v512);
+            sum_acc[j] = _mm512_add_epi16(sum_acc[j], lv_16);
 
-            const __m512i sq_pair = _mm512_madd_epi16(v512, v512);
+            const __m512i sq_pair = _mm512_madd_epi16(lv_16, lv_16);
             sq_sum_acc[j] = _mm512_add_epi32(sq_sum_acc[j], sq_pair);
-        }
-
-        for(int32_t j = 0; j < REMAINDER; j++){
-            int8_t val = lv[NUM_CHUNKS * 32 + j];
-            rem_sum[j] += val;
-            rem_sq_sum[j] += val * val;
         }
     }
 
@@ -1210,19 +1203,13 @@ int eval_accumulate(const Eval *eval)
         sum_sq += hsum_epi32(v_lo_256) + hsum_epi32(v_hi_256);
     }
 
-    for(int32_t i = 0; i < REMAINDER; i++){
-        sum_sq += rem_sum[i] * rem_sum[i];
-        sq_sum += rem_sq_sum[i];
-    }
-
     interaction = sum_sq - sq_sum;
-#elif USE_SIMD && defined __AVX2__ && EVAL_LATENT_VECTOR_DIM >= 16
+#elif USE_SIMD && defined __AVX2__ && EVAL_LATENT_VECTOR_DIM % 16 == 0
     const int32_t CHUNK_SIZE = 16;
 	const int32_t NUM_CHUNKS = EVAL_LATENT_VECTOR_DIM / CHUNK_SIZE;
-	const int32_t REMAINDER = EVAL_LATENT_VECTOR_DIM % CHUNK_SIZE;
 
-	__m256i sum_acc[NUM_CHUNKS > 0 ? NUM_CHUNKS : 1];
-	__m256i sq_sum_acc[NUM_CHUNKS > 0 ? NUM_CHUNKS : 1];
+	__m256i sum_acc[NUM_CHUNKS];
+	__m256i sq_sum_acc[NUM_CHUNKS];
 
 	for(int32_t i = 0; i < NUM_CHUNKS; i++)
 	{
@@ -1230,33 +1217,16 @@ int eval_accumulate(const Eval *eval)
 		sq_sum_acc[i] = _mm256_setzero_si256();
 	}
 
-	int32_t rem_sum[REMAINDER > 0 ? REMAINDER : 1];
-	int32_t rem_sq_sum[REMAINDER > 0 ? REMAINDER : 1];
-
-	for(int32_t j = 0; j < REMAINDER; j++)
-	{
-		rem_sum[j] = 0;
-		rem_sq_sum[j] = 0;
-	}
-
 	for(int32_t i = 0; i < EVAL_N_FEATURE - 1; i++){
 		uint16_t feature = f[i] - FEATURE_OFFSET[i];
-		const int8_t* lv = latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM;
+		const __m128i* lv_8 = (const __m128i*)(latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM);
 
 		for(int32_t j = 0; j < NUM_CHUNKS; j++){
-			const __m128i v8 = _mm_loadu_si128((const __m128i*)(lv + j * CHUNK_SIZE));
-			const __m256i v16 = _mm256_cvtepi8_epi16(v8);
+			const __m256i lv_16 = _mm256_cvtepi8_epi16(lv_8[j]);
+			sum_acc[j] = _mm256_add_epi16(sum_acc[j], lv_16);
 
-			sum_acc[j] = _mm256_add_epi16(sum_acc[j], v16);
-
-			const __m256i sq_pair = _mm256_madd_epi16(v16, v16);
+			const __m256i sq_pair = _mm256_madd_epi16(lv_16, lv_16);
 			sq_sum_acc[j] = _mm256_add_epi32(sq_sum_acc[j], sq_pair);
-		}
-
-		for(int32_t j = 0; j < REMAINDER; j++){
-			int8_t v = lv[NUM_CHUNKS * CHUNK_SIZE + j];
-			rem_sum[j] += v;
-			rem_sq_sum[j] += v * v;
 		}
 	}
 
@@ -1270,11 +1240,6 @@ int eval_accumulate(const Eval *eval)
 
 		sum_sq += hsum_epi32(sum_sq_lo) + hsum_epi32(sum_sq_hi);
 		sq_sum += hsum_epi32(sq_sum_acc[i]);
-	}
-
-	for(int32_t i = 0; i < REMAINDER; i++){
-		sum_sq += rem_sum[i] * rem_sum[i];
-		sq_sum += rem_sq_sum[i];
 	}
 
 	interaction = sum_sq - sq_sum;
