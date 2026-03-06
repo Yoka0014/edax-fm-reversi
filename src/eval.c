@@ -493,8 +493,8 @@ static const uint32_t LATENT_VECTOR_OFFSET[] = {
 /** number of (unpacked) weights */
 static const uint32_t EVAL_N_WEIGHT = 226315;
 
-/** dimension of a latent vector */
-#define EVAL_LATENT_VECTOR_DIM 32  // defined as a macro to allow use in preprocessor directives
+/** dimension of a latent vector (defined as a macro to allow use in preprocessor directives) */
+#define EVAL_LATENT_VECTOR_DIM 32
 
 /** number of latent vectors */
 static const uint32_t EVAL_N_LATENT_VECTOR = 892134;
@@ -1152,6 +1152,7 @@ int eval_accumulate(const Eval *eval)
 	int64_t interaction = 0;
 
 #if USE_SIMD && defined(__AVX512F__) && defined(__AVX512BW__) && EVAL_LATENT_VECTOR_DIM % 32 == 0
+
     const int32_t CHUNK_SIZE = 32;
     const int32_t NUM_CHUNKS = EVAL_LATENT_VECTOR_DIM / CHUNK_SIZE;
 
@@ -1204,7 +1205,9 @@ int eval_accumulate(const Eval *eval)
     }
 
     interaction = sum_sq - sq_sum;
+
 #elif USE_SIMD && defined __AVX2__ && EVAL_LATENT_VECTOR_DIM % 16 == 0
+
     const int32_t CHUNK_SIZE = 16;
 	const int32_t NUM_CHUNKS = EVAL_LATENT_VECTOR_DIM / CHUNK_SIZE;
 
@@ -1243,7 +1246,9 @@ int eval_accumulate(const Eval *eval)
 	}
 
 	interaction = sum_sq - sq_sum;
+
 #else
+
     int32_t sum_acc[EVAL_LATENT_VECTOR_DIM];
     int32_t sq_sum_acc[EVAL_LATENT_VECTOR_DIM];
 
@@ -1268,6 +1273,7 @@ int eval_accumulate(const Eval *eval)
 	}
 
 	interaction = sum_sq - sq_sum;
+    
 #endif
 
     interaction *= 128;
