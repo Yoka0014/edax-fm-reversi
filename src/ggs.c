@@ -1496,7 +1496,7 @@ void ui_loop_ggs(UI *ui) {
 			ggs_client_send(client, "chann %%\n");
 			ggs_client_send(client, "chann + .chat\n");
 			ggs_client_send(client, "chann + .%s\n", client->me);
-			ggs_client_send(client, "tell .%s Hello!\n", client->me);
+			ggs_client_send(client, "tell .%s Hello, I am Kalmia, an Othello AI powered by the Edax engine (Richard Delorme), featuring a custom evaluation function based on a 2-way Factorization Machine.\n", client->me);
 
 		/* os on */
 		} else if (ggs_os_on(&text)) {
