@@ -9,8 +9,8 @@
  *
  * Modified 2025 - 2026 by Yuichiro Okashita
  * Changes: Augmented the linear evaluation model with Factorization Machine
- *          (FM) second-order interaction terms to capture pairwise feature
- *          interactions.
+ * (FM) second-order interaction terms to capture pairwise feature
+ * interactions.
  */
 
 #include "eval.h"
@@ -28,81 +28,81 @@
 
 /** coordinate to feature conversion */
 typedef struct CoordinateToFeature {
-	int n_feature;
-	struct {
-		uint16_t i;
-		uint16_t x;
-	} feature[7];
+    int n_feature;
+    struct {
+        uint16_t i;
+        uint16_t x;
+    } feature[7];
 } CoordinateToFeature;
 
 /** feature to coordinates conversion */
 typedef struct FeatureToCoordinate {
-	uint32_t n_square;
-	uint8_t x[12];
+    uint32_t n_square;
+    uint8_t x[12];
 } FeatureToCoordinate;
 
 /** array to convert features into coordinates */
 static const FeatureToCoordinate EVAL_F2X[] = {
-	{ 9, {A1, B1, A2, B2, C1, A3, C2, B3, C3}},
-	{ 9, {H1, G1, H2, G2, F1, H3, F2, G3, F3}},
-	{ 9, {A8, A7, B8, B7, A6, C8, B6, C7, C6}},
-	{ 9, {H8, H7, G8, G7, H6, F8, G6, F7, F6}},
+    { 9, {A1, B1, A2, B2, C1, A3, C2, B3, C3}},
+    { 9, {H1, G1, H2, G2, F1, H3, F2, G3, F3}},
+    { 9, {A8, A7, B8, B7, A6, C8, B6, C7, C6}},
+    { 9, {H8, H7, G8, G7, H6, F8, G6, F7, F6}},
 
-	{10, {A5, A4, A3, A2, A1, B2, B1, C1, D1, E1}},
-	{10, {H5, H4, H3, H2, H1, G2, G1, F1, E1, D1}},
-	{10, {A4, A5, A6, A7, A8, B7, B8, C8, D8, E8}},
-	{10, {H4, H5, H6, H7, H8, G7, G8, F8, E8, D8}},
+    {10, {A5, A4, A3, A2, A1, B2, B1, C1, D1, E1}},
+    {10, {H5, H4, H3, H2, H1, G2, G1, F1, E1, D1}},
+    {10, {A4, A5, A6, A7, A8, B7, B8, C8, D8, E8}},
+    {10, {H4, H5, H6, H7, H8, G7, G8, F8, E8, D8}},
 
-	{10, {B2, A1, B1, C1, D1, E1, F1, G1, H1, G2}},
-	{10, {B7, A8, B8, C8, D8, E8, F8, G8, H8, G7}},
-	{10, {B2, A1, A2, A3, A4, A5, A6, A7, A8, B7}},
-	{10, {G2, H1, H2, H3, H4, H5, H6, H7, H8, G7}},
+    {10, {B2, A1, B1, C1, D1, E1, F1, G1, H1, G2}},
+    {10, {B7, A8, B8, C8, D8, E8, F8, G8, H8, G7}},
+    {10, {B2, A1, A2, A3, A4, A5, A6, A7, A8, B7}},
+    {10, {G2, H1, H2, H3, H4, H5, H6, H7, H8, G7}},
 
-	{10, {A1, C1, D1, C2, D2, E2, F2, E1, F1, H1}},
-	{10, {A8, C8, D8, C7, D7, E7, F7, E8, F8, H8}},
-	{10, {A1, A3, A4, B3, B4, B5, B6, A5, A6, A8}},
-	{10, {H1, H3, H4, G3, G4, G5, G6, H5, H6, H8}},
+    {10, {A1, C1, D1, C2, D2, E2, F2, E1, F1, H1}},
+    {10, {A8, C8, D8, C7, D7, E7, F7, E8, F8, H8}},
+    {10, {A1, A3, A4, B3, B4, B5, B6, A5, A6, A8}},
+    {10, {H1, H3, H4, G3, G4, G5, G6, H5, H6, H8}},
 
-	{ 8, {A2, B2, C2, D2, E2, F2, G2, H2}},
-	{ 8, {A7, B7, C7, D7, E7, F7, G7, H7}},
-	{ 8, {B1, B2, B3, B4, B5, B6, B7, B8}},
-	{ 8, {G1, G2, G3, G4, G5, G6, G7, G8}},
+    { 8, {A2, B2, C2, D2, E2, F2, G2, H2}},
+    { 8, {A7, B7, C7, D7, E7, F7, G7, H7}},
+    { 8, {B1, B2, B3, B4, B5, B6, B7, B8}},
+    { 8, {G1, G2, G3, G4, G5, G6, G7, G8}},
 
-	{ 8, {A3, B3, C3, D3, E3, F3, G3, H3}},
-	{ 8, {A6, B6, C6, D6, E6, F6, G6, H6}},
-	{ 8, {C1, C2, C3, C4, C5, C6, C7, C8}},
-	{ 8, {F1, F2, F3, F4, F5, F6, F7, F8}},
+    { 8, {A3, B3, C3, D3, E3, F3, G3, H3}},
+    { 8, {A6, B6, C6, D6, E6, F6, G6, H6}},
+    { 8, {C1, C2, C3, C4, C5, C6, C7, C8}},
+    { 8, {F1, F2, F3, F4, F5, F6, F7, F8}},
 
-	{ 8, {A4, B4, C4, D4, E4, F4, G4, H4}},
-	{ 8, {A5, B5, C5, D5, E5, F5, G5, H5}},
-	{ 8, {D1, D2, D3, D4, D5, D6, D7, D8}},
-	{ 8, {E1, E2, E3, E4, E5, E6, E7, E8}},
+    { 8, {A4, B4, C4, D4, E4, F4, G4, H4}},
+    { 8, {A5, B5, C5, D5, E5, F5, G5, H5}},
+    { 8, {D1, D2, D3, D4, D5, D6, D7, D8}},
+    { 8, {E1, E2, E3, E4, E5, E6, E7, E8}},
 
-	{ 8, {A1, B2, C3, D4, E5, F6, G7, H8}},
-	{ 8, {A8, B7, C6, D5, E4, F3, G2, H1}},
+    { 8, {A1, B2, C3, D4, E5, F6, G7, H8}},
+    { 8, {A8, B7, C6, D5, E4, F3, G2, H1}},
 
-	{ 7, {B1, C2, D3, E4, F5, G6, H7}},
-	{ 7, {H2, G3, F4, E5, D6, C7, B8}},
-	{ 7, {A2, B3, C4, D5, E6, F7, G8}},
-	{ 7, {G1, F2, E3, D4, C5, B6, A7}},
+    { 7, {B1, C2, D3, E4, F5, G6, H7}},
+    { 7, {H2, G3, F4, E5, D6, C7, B8}},
+    { 7, {A2, B3, C4, D5, E6, F7, G8}},
+    { 7, {G1, F2, E3, D4, C5, B6, A7}},
 
-	{ 6, {C1, D2, E3, F4, G5, H6}},
-	{ 6, {A3, B4, C5, D6, E7, F8}},
-	{ 6, {F1, E2, D3, C4, B5, A6}},
-	{ 6, {H3, G4, F5, E6, D7, C8}},
+    { 6, {C1, D2, E3, F4, G5, H6}},
+    { 6, {A3, B4, C5, D6, E7, F8}},
+    { 6, {F1, E2, D3, C4, B5, A6}},
+    { 6, {H3, G4, F5, E6, D7, C8}},
 
-	{ 5, {D1, E2, F3, G4, H5}},
-	{ 5, {A4, B5, C6, D7, E8}},
-	{ 5, {E1, D2, C3, B4, A5}},
-	{ 5, {H4, G5, F6, E7, D8}},
+    { 5, {D1, E2, F3, G4, H5}},
+    { 5, {A4, B5, C6, D7, E8}},
+    { 5, {E1, D2, C3, B4, A5}},
+    { 5, {H4, G5, F6, E7, D8}},
 
-	{ 4, {D1, C2, B3, A4}},
-	{ 4, {A5, B6, C7, D8}},
-	{ 4, {E1, F2, G3, H4}},
-	{ 4, {H5, G6, F7, E8}},
+    { 4, {D1, C2, B3, A4}},
+    { 4, {A5, B6, C7, D8}},
+    { 4, {E1, F2, G3, H4}},
+    { 4, {H5, G6, F7, E8}},
 
-	{ 0, {NOMOVE}},
-	{ 0, {NOMOVE}}
+    { 0, {NOMOVE}},
+    { 0, {NOMOVE}}
 };
 
 /** array to convert coordinates into feature */
@@ -441,6 +441,46 @@ const Feature EVAL_FEATURE[] = {
 	}}
 };
 
+typedef enum {
+    CORNER_3X3 = 0,
+    CORNER_EDGE_X = 1,
+    EDGE_2X = 2,
+    BLOCK_AND_CORNER = 3,
+    LINE_2 = 4,
+    LINE_3 = 5,
+    LINE_4 = 6,
+    DIAG_8 = 7,
+    DIAG_7 = 8,
+    DIAG_6 = 9,
+    DIAG_5 = 10,
+    DIAG_4 = 11,
+    NUM_PATTERN_TYPES = 12
+} PatternLabel;
+
+/**
+ * Patterns used for FM interactions (1 = active, 0 = removed)
+ */
+static const int ACTIVE_FM_PATTERNS[NUM_PATTERN_TYPES] = {
+    1, // CORNER_3X3
+    0, // CORNER_EDGE_X
+    1, // EDGE_2X
+    0, // BLOCK_AND_CORNER
+    1, // LINE_2
+    0, // LINE_3
+    0, // LINE_4
+    1, // DIAG_8
+    1, // DIAG_7
+    1, // DIAG_6
+    1, // DIAG_5
+    1  // DIAG_4
+};
+
+/** Number of symmetrical patterns for each pattern type */
+static const int PATTERN_NUM_SYMS[NUM_PATTERN_TYPES] = {
+    4, 4, 4, 4, 4, 4, 4, 2, 4, 4, 4, 4
+};
+
+// ==========================================================
 
 /** feature size */
 static const uint32_t EVAL_SIZE[] = {19683, 59049, 59049, 59049, 6561, 6561, 6561, 6561, 2187, 729, 243, 81, 1};
@@ -450,44 +490,28 @@ static const uint32_t EVAL_PACKED_SIZE[] = {10206, 29889, 29646, 29646, 3321, 33
 
 /** feature offset */
 static const uint32_t WEIGHT_OFFSET[] = {
-	     0,
-	 19683,
-	 78732,
-	137781,
-	196830,
+         0,
+     19683,
+     78732,
+    137781,
+    196830,
 };
 
 /** feature offset */
 static const uint32_t FEATURE_OFFSET[] = {
-	    0,     0,     0,     0,
-	    0,     0,     0,     0,
-	    0,     0,     0,     0,
-	    0,     0,     0,     0,
-	    0,     0,     0,     0,
-	 6561,  6561,  6561,  6561,
-	13122, 13122, 13122, 13122,
-	19683, 19683,
-	26244, 26244, 26244, 26244,
-	28431, 28431, 28431, 28431,
-	29160, 29160, 29160, 29160,
-	29403, 29403, 29403, 29403,
-	29484, 29485
-};
-
-/** per-location feature offset */
-static const uint32_t LATENT_VECTOR_OFFSET[] = {
-	      0,  19683,  39366,  59049,
-	  78732, 137781, 196830, 255879,
-	 314928, 373977, 433026, 492075,
-	 551124, 610173, 669222, 728271,
-	 787320, 793881, 800442, 807003,
-	 813564, 820125, 826686, 833247,
-	 839808, 846369, 852930, 859491,
-	 866052, 872613,
-	 879174, 881361, 883548, 885735,
-	 887922, 888651, 889380, 890109,
-	 890838, 891081, 891324, 891567,
-	 891810, 891891, 891972, 892053
+        0,     0,     0,     0,
+        0,     0,     0,     0,
+        0,     0,     0,     0,
+        0,     0,     0,     0,
+        0,     0,     0,     0,
+     6561,  6561,  6561,  6561,
+    13122, 13122, 13122, 13122,
+    19683, 19683,
+    26244, 26244, 26244, 26244,
+    28431, 28431, 28431, 28431,
+    29160, 29160, 29160, 29160,
+    29403, 29403, 29403, 29403,
+    29484, 29485
 };
 
 /** number of (unpacked) weights */
@@ -496,8 +520,11 @@ static const uint32_t EVAL_N_WEIGHT = 226315;
 /** dimension of a latent vector (defined as a macro to allow use in preprocessor directives) */
 #define EVAL_LATENT_VECTOR_DIM 32
 
-/** number of latent vectors */
-static const uint32_t EVAL_N_LATENT_VECTOR = 892134;
+/** number of latent vectors (it is computed dynamically) */
+static uint32_t EVAL_N_LATENT_VECTOR = 0;
+
+/** per-location feature offset (only array size is specified as it is computed dynamically) */
+static uint32_t LATENT_VECTOR_OFFSET[47];
 
 /** quantization scale of latent vectors */
 static const uint32_t EVAL_QUANT_SCALE_LATENT_VECTOR = 128;
@@ -530,12 +557,12 @@ static int8_t *EVAL_LATENT_VECTOR[2];
  */
 static uint32_t opponent_feature(uint32_t l, uint32_t d)
 {
-	static const uint8_t o[] = {1, 0, 2};
-	uint32_t f = o[l % 3];
+    static const uint8_t o[] = {1, 0, 2};
+    uint32_t f = o[l % 3];
 
-	if (d > 1) f += opponent_feature(l / 3, d - 1) * 3;
+    if (d > 1) f += opponent_feature(l / 3, d - 1) * 3;
 
-	return f;
+    return f;
 }
 
 /**
@@ -549,29 +576,29 @@ static uint32_t opponent_feature(uint32_t l, uint32_t d)
  */
 static uint32_t player_feature(const int sym[], uint32_t n, uint32_t l)
 {
-	uint32_t power3[] = {1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683 };
-	uint32_t f, i;
+    uint32_t power3[] = {1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683 };
+    uint32_t f, i;
 
-	for (f = i = 0; i < n; ++i) {
-		f += ((l / power3[sym[i]]) % 3) * power3[i];
-	}
+    for (f = i = 0; i < n; ++i) {
+        f += ((l / power3[sym[i]]) % 3) * power3[i];
+    }
 
-	return f;
+    return f;
 }
 
 static int** alloc_pack(size_t size)
 {
-	int **pack = (int**) malloc (2 * sizeof (int*));
-	pack[0] = (int*) malloc(size * sizeof (int));
-	pack[1] = (int*) malloc(size * sizeof (int));
-	return pack;
+    int **pack = (int**) malloc (2 * sizeof (int*));
+    pack[0] = (int*) malloc(size * sizeof (int));
+    pack[1] = (int*) malloc(size * sizeof (int));
+    return pack;
 }
 
 static void free_pack(int **pack)
  {
-	free(pack[1]);
-	free(pack[0]);
-	free(pack);
+    free(pack[1]);
+    free(pack[0]);
+    free(pack);
 }
 
 /**
@@ -580,16 +607,16 @@ static void free_pack(int **pack)
  */
 static int **unpack(const uint32_t length, const uint32_t size, const int sym[])
 {
-	uint32_t i, j, n;
-	int ** pack = alloc_pack(size);
+    uint32_t i, j, n;
+    int ** pack = alloc_pack(size);
 
-	for (i = n = 0; i < size; ++i) {
-		j = player_feature(sym, length, i);
-		if (j < i) pack[0][i] = pack[0][j];
-		else pack[0][i] = n++;
-		pack[1][opponent_feature(i, length)] = pack[0][i];
-	}
-	return pack;
+    for (i = n = 0; i < size; ++i) {
+        j = player_feature(sym, length, i);
+        if (j < i) pack[0][i] = pack[0][j];
+        else pack[0][i] = n++;
+        pack[1][opponent_feature(i, length)] = pack[0][i];
+    }
+    return pack;
 }
 
 /**
@@ -604,153 +631,171 @@ static int **unpack(const uint32_t length, const uint32_t size, const int sym[])
  */
 void eval_open(const char* file)
 {
-	const uint32_t n_w = 114364;
-	uint32_t edax_header, eval_header;
-	uint32_t version, release, build;
-	double date;
-	uint32_t ply, i, j, k, r, offset;
-	FILE* f;
-	int16_t *w = NULL;
-	static const int sym_S10[] = { 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
-	static const int sym_C10[] = { 9, 8, 7, 6, 4, 5, 3, 2, 1, 0 };
-	static const int sym_C9[]  = { 0, 2, 1, 4, 3, 5, 7, 6, 8};
-	/** feature symetry packing */
-	int **EVAL_C10, **EVAL_S10, **EVAL_C9, **EVAL_S8, **EVAL_S7, **EVAL_S6, **EVAL_S5, **EVAL_S4;
+    const uint32_t n_w = 114364;
+    uint32_t edax_header, eval_header;
+    uint32_t version, release, build;
+    double date;
+    uint32_t ply, i, j, k, r, offset;
+    FILE* f;
+    int16_t *w = NULL;
+    static const int sym_S10[] = { 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    static const int sym_C10[] = { 9, 8, 7, 6, 4, 5, 3, 2, 1, 0 };
+    static const int sym_C9[]  = { 0, 2, 1, 4, 3, 5, 7, 6, 8};
+    /** feature symetry packing */
+    int **EVAL_C10, **EVAL_S10, **EVAL_C9, **EVAL_S8, **EVAL_S7, **EVAL_S6, **EVAL_S5, **EVAL_S4;
 
-	if (EVAL_LOADED++) return;
+    if (EVAL_LOADED++) return;
 
-	// create unpacking tables
-	// linear symetries
-	EVAL_S10 = unpack(10, 59049, sym_S10);     // 10 squares (edge +X ) : 59049 -> 29646
-	EVAL_S8  = unpack( 8,  6561, sym_S10 + 2); // 8 squares : 6561 -> 3321
-	EVAL_S7  = unpack( 7,  2187, sym_S10 + 3); // 7 squares : 2187 -> 1134
-	EVAL_S6  = unpack( 6,   729, sym_S10 + 4); // 6 squares :  729 ->  378
-	EVAL_S5  = unpack( 5,   243, sym_S10 + 5); // 5 squares :  243 ->  135
-	EVAL_S4  = unpack( 4,    81, sym_S10 + 6); // 4 squares :   81  -> 45
-	// corner symetries
-	EVAL_C9  = unpack( 9, 19683, sym_C9);      // 9 corner squares 19683 -> 1006
-	EVAL_C10 = unpack(10, 59049, sym_C10);     // 10 squares (angle + X) : 59049 -> 29889
+    // create unpacking tables
+    // linear symetries
+    EVAL_S10 = unpack(10, 59049, sym_S10);     // 10 squares (edge +X ) : 59049 -> 29646
+    EVAL_S8  = unpack( 8,  6561, sym_S10 + 2); // 8 squares : 6561 -> 3321
+    EVAL_S7  = unpack( 7,  2187, sym_S10 + 3); // 7 squares : 2187 -> 1134
+    EVAL_S6  = unpack( 6,   729, sym_S10 + 4); // 6 squares :  729 ->  378
+    EVAL_S5  = unpack( 5,   243, sym_S10 + 5); // 5 squares :  243 ->  135
+    EVAL_S4  = unpack( 4,    81, sym_S10 + 6); // 4 squares :   81  -> 45
+    // corner symetries
+    EVAL_C9  = unpack( 9, 19683, sym_C9);      // 9 corner squares 19683 -> 1006
+    EVAL_C10 = unpack(10, 59049, sym_C10);     // 10 squares (angle + X) : 59049 -> 29889
 
-	// allocation
-	int16_t *eval_weight = (int16_t*) malloc(2 * EVAL_N_PLY * (EVAL_N_WEIGHT + 2) * sizeof (int16_t));
-	if (eval_weight == NULL) fatal_error("Cannot allocate evaluation weights.\n");
-	EVAL_WEIGHT[0][0] = eval_weight + 1;
-	EVAL_WEIGHT[0][1] = eval_weight + 1 + EVAL_N_WEIGHT + 1;
-	for (ply = 1; ply < EVAL_N_PLY; ply++) {
-		EVAL_WEIGHT[ply][0] = EVAL_WEIGHT[ply - 1][0] + 2 * (EVAL_N_WEIGHT + 1);
-		EVAL_WEIGHT[ply][1] = EVAL_WEIGHT[ply][0] + EVAL_N_WEIGHT + 1;
-	}
+    // allocation
+    int16_t *eval_weight = (int16_t*) malloc(2 * EVAL_N_PLY * (EVAL_N_WEIGHT + 2) * sizeof (int16_t));
+    if (eval_weight == NULL) fatal_error("Cannot allocate evaluation weights.\n");
+    EVAL_WEIGHT[0][0] = eval_weight + 1;
+    EVAL_WEIGHT[0][1] = eval_weight + 1 + EVAL_N_WEIGHT + 1;
+    for (ply = 1; ply < EVAL_N_PLY; ply++) {
+        EVAL_WEIGHT[ply][0] = EVAL_WEIGHT[ply - 1][0] + 2 * (EVAL_N_WEIGHT + 1);
+        EVAL_WEIGHT[ply][1] = EVAL_WEIGHT[ply][0] + EVAL_N_WEIGHT + 1;
+    }
 
-	// data reading
-	w = (int16_t*) malloc(n_w * sizeof (int16_t)); // a temporary to read packed weights
-	f = fopen(file, "rb");
-	if (f == NULL) {
-		fprintf(stderr, "Cannot open %s", file);
-		exit(EXIT_FAILURE);
-	}
+    // data reading
+    w = (int16_t*) malloc(n_w * sizeof (int16_t)); // a temporary to read packed weights
+    f = fopen(file, "rb");
+    if (f == NULL) {
+        fprintf(stderr, "Cannot open %s", file);
+        exit(EXIT_FAILURE);
+    }
 
-	// File header
-	r = fread(&edax_header, sizeof (int), 1, f);
-	r += fread(&eval_header, sizeof (int), 1, f);
-	if (r != 2 || (!(edax_header == EDAX || eval_header == EVAL) && !(edax_header == XADE || eval_header == LAVE))) fatal_error("%s is not an Edax evaluation file\n", file);
-	r  = fread(&version, sizeof (int), 1, f);
-	r += fread(&release, sizeof (int), 1, f);
-	r += fread(&build, sizeof (int), 1, f);
-	r += fread(&date, sizeof (double), 1, f);
-	if (r != 4) fatal_error("Cannot read version info from %s\n", file);
-	if (edax_header == XADE) {
-		version = bswap_32(version);
-		release = bswap_32(release);
-		build = bswap_32(build);
-	}
-	// Weights : read & unpacked them
-	for (ply = 0; ply < EVAL_N_PLY; ply++) {
-		r = fread(w, sizeof (int16_t), n_w, f);
-		if (r != n_w) fatal_error("Cannot read evaluation weight from %s\n", file);
-		if (edax_header == XADE) for (i = 0; i < n_w; ++i) w[i] = bswap_16(w[i]);
+    // File header
+    r = fread(&edax_header, sizeof (int), 1, f);
+    r += fread(&eval_header, sizeof (int), 1, f);
+    if (r != 2 || (!(edax_header == EDAX || eval_header == EVAL) && !(edax_header == XADE || eval_header == LAVE))) fatal_error("%s is not an Edax evaluation file\n", file);
+    r  = fread(&version, sizeof (int), 1, f);
+    r += fread(&release, sizeof (int), 1, f);
+    r += fread(&build, sizeof (int), 1, f);
+    r += fread(&date, sizeof (double), 1, f);
+    if (r != 4) fatal_error("Cannot read version info from %s\n", file);
+    if (edax_header == XADE) {
+        version = bswap_32(version);
+        release = bswap_32(release);
+        build = bswap_32(build);
+    }
+    // Weights : read & unpacked them
+    for (ply = 0; ply < EVAL_N_PLY; ply++) {
+        r = fread(w, sizeof (int16_t), n_w, f);
+        if (r != n_w) fatal_error("Cannot read evaluation weight from %s\n", file);
+        if (edax_header == XADE) for (i = 0; i < n_w; ++i) w[i] = bswap_16(w[i]);
 
-		EVAL_WEIGHT[ply][0][-1] = 0;
-		EVAL_WEIGHT[ply][1][-1] = 0;
+        EVAL_WEIGHT[ply][0][-1] = 0;
+        EVAL_WEIGHT[ply][1][-1] = 0;
 
-		j = offset = 0;
-		for (k = 0; k < EVAL_SIZE[0]; k++, j++) {
-			EVAL_WEIGHT[ply][0][j] = w[EVAL_C9[0][k] + offset];
-			EVAL_WEIGHT[ply][1][j] = w[EVAL_C9[1][k] + offset];
-		}
+        j = offset = 0;
+        for (k = 0; k < EVAL_SIZE[0]; k++, j++) {
+            EVAL_WEIGHT[ply][0][j] = w[EVAL_C9[0][k] + offset];
+            EVAL_WEIGHT[ply][1][j] = w[EVAL_C9[1][k] + offset];
+        }
 
-		offset += EVAL_PACKED_SIZE[0];
-		for (k = 0; k < EVAL_SIZE[1]; k++, j++) {
-			EVAL_WEIGHT[ply][0][j] = w[EVAL_C10[0][k] + offset];
-			EVAL_WEIGHT[ply][1][j] = w[EVAL_C10[1][k] + offset];
-		}
+        offset += EVAL_PACKED_SIZE[0];
+        for (k = 0; k < EVAL_SIZE[1]; k++, j++) {
+            EVAL_WEIGHT[ply][0][j] = w[EVAL_C10[0][k] + offset];
+            EVAL_WEIGHT[ply][1][j] = w[EVAL_C10[1][k] + offset];
+        }
 
-		offset += EVAL_PACKED_SIZE[1];
-		for (k = 0; k < EVAL_SIZE[2]; k++, j++) {
-			EVAL_WEIGHT[ply][0][j] = w[EVAL_S10[0][k] + offset];
-			EVAL_WEIGHT[ply][1][j] = w[EVAL_S10[1][k] + offset];
-		}
+        offset += EVAL_PACKED_SIZE[1];
+        for (k = 0; k < EVAL_SIZE[2]; k++, j++) {
+            EVAL_WEIGHT[ply][0][j] = w[EVAL_S10[0][k] + offset];
+            EVAL_WEIGHT[ply][1][j] = w[EVAL_S10[1][k] + offset];
+        }
 
-		offset += EVAL_PACKED_SIZE[2];
-		for (k = 0; k < EVAL_SIZE[3]; k++, j++) {
-			EVAL_WEIGHT[ply][0][j] = w[EVAL_S10[0][k] + offset];
-			EVAL_WEIGHT[ply][1][j] = w[EVAL_S10[1][k] + offset];
-		}
+        offset += EVAL_PACKED_SIZE[2];
+        for (k = 0; k < EVAL_SIZE[3]; k++, j++) {
+            EVAL_WEIGHT[ply][0][j] = w[EVAL_S10[0][k] + offset];
+            EVAL_WEIGHT[ply][1][j] = w[EVAL_S10[1][k] + offset];
+        }
 
-		offset += EVAL_PACKED_SIZE[3];
-		for (k = 0; k < EVAL_SIZE[4]; k++, j++) {
-			EVAL_WEIGHT[ply][0][j] = w[EVAL_S8[0][k] + offset];
-			EVAL_WEIGHT[ply][1][j] = w[EVAL_S8[1][k] + offset];
-		}
+        offset += EVAL_PACKED_SIZE[3];
+        for (k = 0; k < EVAL_SIZE[4]; k++, j++) {
+            EVAL_WEIGHT[ply][0][j] = w[EVAL_S8[0][k] + offset];
+            EVAL_WEIGHT[ply][1][j] = w[EVAL_S8[1][k] + offset];
+        }
 
-		offset += EVAL_PACKED_SIZE[4];
-		for (k = 0; k < EVAL_SIZE[5]; k++, j++) {
-			EVAL_WEIGHT[ply][0][j] = w[EVAL_S8[0][k] + offset];
-			EVAL_WEIGHT[ply][1][j] = w[EVAL_S8[1][k] + offset];
-		}
+        offset += EVAL_PACKED_SIZE[4];
+        for (k = 0; k < EVAL_SIZE[5]; k++, j++) {
+            EVAL_WEIGHT[ply][0][j] = w[EVAL_S8[0][k] + offset];
+            EVAL_WEIGHT[ply][1][j] = w[EVAL_S8[1][k] + offset];
+        }
 
-		offset += EVAL_PACKED_SIZE[5];
-		for (k = 0; k < EVAL_SIZE[6]; k++, j++) {
-			EVAL_WEIGHT[ply][0][j] = w[EVAL_S8[0][k] + offset];
-			EVAL_WEIGHT[ply][1][j] = w[EVAL_S8[1][k] + offset];
-		}
+        offset += EVAL_PACKED_SIZE[5];
+        for (k = 0; k < EVAL_SIZE[6]; k++, j++) {
+            EVAL_WEIGHT[ply][0][j] = w[EVAL_S8[0][k] + offset];
+            EVAL_WEIGHT[ply][1][j] = w[EVAL_S8[1][k] + offset];
+        }
 
-		offset += EVAL_PACKED_SIZE[6];
-		for (k = 0; k < EVAL_SIZE[7]; k++, j++) {
-			EVAL_WEIGHT[ply][0][j] = w[EVAL_S8[0][k] + offset];
-			EVAL_WEIGHT[ply][1][j] = w[EVAL_S8[1][k] + offset];
-		}
+        offset += EVAL_PACKED_SIZE[6];
+        for (k = 0; k < EVAL_SIZE[7]; k++, j++) {
+            EVAL_WEIGHT[ply][0][j] = w[EVAL_S8[0][k] + offset];
+            EVAL_WEIGHT[ply][1][j] = w[EVAL_S8[1][k] + offset];
+        }
 
-		offset += EVAL_PACKED_SIZE[7];
-		for (k = 0; k < EVAL_SIZE[8]; k++, j++) {
-			EVAL_WEIGHT[ply][0][j] = w[EVAL_S7[0][k] + offset];
-			EVAL_WEIGHT[ply][1][j] = w[EVAL_S7[1][k] + offset];
-		}
+        offset += EVAL_PACKED_SIZE[7];
+        for (k = 0; k < EVAL_SIZE[8]; k++, j++) {
+            EVAL_WEIGHT[ply][0][j] = w[EVAL_S7[0][k] + offset];
+            EVAL_WEIGHT[ply][1][j] = w[EVAL_S7[1][k] + offset];
+        }
 
-		offset += EVAL_PACKED_SIZE[8];
-		for (k = 0; k < EVAL_SIZE[9]; k++, j++) {
-			EVAL_WEIGHT[ply][0][j] = w[EVAL_S6[0][k] + offset];
-			EVAL_WEIGHT[ply][1][j] = w[EVAL_S6[1][k] + offset];
-		}
+        offset += EVAL_PACKED_SIZE[8];
+        for (k = 0; k < EVAL_SIZE[9]; k++, j++) {
+            EVAL_WEIGHT[ply][0][j] = w[EVAL_S6[0][k] + offset];
+            EVAL_WEIGHT[ply][1][j] = w[EVAL_S6[1][k] + offset];
+        }
 
-		offset += EVAL_PACKED_SIZE[9];
-		for (k = 0; k < EVAL_SIZE[10]; k++, j++) {
-			EVAL_WEIGHT[ply][0][j] = w[EVAL_S5[0][k] + offset];
-			EVAL_WEIGHT[ply][1][j] = w[EVAL_S5[1][k] + offset];
-		}
+        offset += EVAL_PACKED_SIZE[9];
+        for (k = 0; k < EVAL_SIZE[10]; k++, j++) {
+            EVAL_WEIGHT[ply][0][j] = w[EVAL_S5[0][k] + offset];
+            EVAL_WEIGHT[ply][1][j] = w[EVAL_S5[1][k] + offset];
+        }
 
-		offset += EVAL_PACKED_SIZE[10];
-		for (k = 0; k < EVAL_SIZE[11]; k++, j++) {
-			EVAL_WEIGHT[ply][0][j] = w[EVAL_S4[0][k] + offset];
-			EVAL_WEIGHT[ply][1][j] = w[EVAL_S4[1][k] + offset];
-		}
+        offset += EVAL_PACKED_SIZE[10];
+        for (k = 0; k < EVAL_SIZE[11]; k++, j++) {
+            EVAL_WEIGHT[ply][0][j] = w[EVAL_S4[0][k] + offset];
+            EVAL_WEIGHT[ply][1][j] = w[EVAL_S4[1][k] + offset];
+        }
 
-		offset += EVAL_PACKED_SIZE[11];
-		EVAL_WEIGHT[ply][0][j] = w[offset];
-		EVAL_WEIGHT[ply][1][j] = w[offset];
+        offset += EVAL_PACKED_SIZE[11];
+        EVAL_WEIGHT[ply][0][j] = w[offset];
+        EVAL_WEIGHT[ply][1][j] = w[offset];
 
-		EVAL_WEIGHT[ply][0][j + 1] = 0;
-		EVAL_WEIGHT[ply][1][j + 1] = 0;
-	}
+        EVAL_WEIGHT[ply][0][j + 1] = 0;
+        EVAL_WEIGHT[ply][1][j + 1] = 0;
+    }
+
+    // ====== C++側と同期するためのFMオフセットの動的計算 ======
+    EVAL_N_LATENT_VECTOR = 0;
+    int f_idx = 0;
+    for (int p = 0; p < NUM_PATTERN_TYPES; p++) {
+        int num_syms = PATTERN_NUM_SYMS[p];
+        if (ACTIVE_FM_PATTERNS[p]) {
+            for (int s = 0; s < num_syms; s++) {
+                LATENT_VECTOR_OFFSET[f_idx + s] = EVAL_N_LATENT_VECTOR;
+                EVAL_N_LATENT_VECTOR += EVAL_SIZE[p];
+            }
+        } else {
+            for (int s = 0; s < num_syms; s++) {
+                LATENT_VECTOR_OFFSET[f_idx + s] = 0; 
+            }
+        }
+        f_idx += num_syms;
+    }
 
     // Load latent vectors
 #if USE_SIMD && defined(__AVX512F__) && defined(__AVX512BW__) && EVAL_LATENT_VECTOR_DIM % 32 == 0
@@ -769,36 +814,47 @@ void eval_open(const char* file)
     if (r != EVAL_N_LATENT_VECTOR) fatal_error("Cannot read latent vectors from %s\n", file);
 
     uint32_t power3[] = {1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683, 59049 };
-    for(int32_t i = 0; i < EVAL_N_FEATURE - 1; i++)
-	{
-		uint32_t offset = LATENT_VECTOR_OFFSET[i] * EVAL_LATENT_VECTOR_DIM;
-		uint32_t size = EVAL_F2X[i].n_square;
-		uint32_t feature_max = power3[size];
-		for(uint32_t feature = 0; feature < feature_max; feature++)
-			memcpy(
-				EVAL_LATENT_VECTOR[1] + offset + feature * EVAL_LATENT_VECTOR_DIM,
-				EVAL_LATENT_VECTOR[0] + offset + opponent_feature(feature, size) * EVAL_LATENT_VECTOR_DIM,
-				EVAL_LATENT_VECTOR_DIM
-			);
-	}
+    
+    // ====== 白番用オフセット・コピー処理 (アクティブなパターンのみ処理) ======
+    f_idx = 0;
+    for(int p = 0; p < NUM_PATTERN_TYPES; p++)
+    {
+        int num_syms = PATTERN_NUM_SYMS[p];
+        if (ACTIVE_FM_PATTERNS[p]) {
+            for(int s = 0; s < num_syms; s++) {
+                uint32_t i = f_idx + s;
+                uint32_t offset = LATENT_VECTOR_OFFSET[i] * EVAL_LATENT_VECTOR_DIM;
+                uint32_t size = EVAL_F2X[i].n_square;
+                uint32_t feature_max = power3[size];
+                for(uint32_t feature = 0; feature < feature_max; feature++) {
+                    memcpy(
+                        EVAL_LATENT_VECTOR[1] + offset + feature * EVAL_LATENT_VECTOR_DIM,
+                        EVAL_LATENT_VECTOR[0] + offset + opponent_feature(feature, size) * EVAL_LATENT_VECTOR_DIM,
+                        EVAL_LATENT_VECTOR_DIM
+                    );
+                }
+            }
+        }
+        f_idx += num_syms;
+    }
 
-	fclose(f);
-	free(w);
-	free_pack(EVAL_C10);
-	free_pack(EVAL_S10);
-	free_pack(EVAL_C9);
-	free_pack(EVAL_S8);
-	free_pack(EVAL_S7);
-	free_pack(EVAL_S6);
-	free_pack(EVAL_S5);
-	free_pack(EVAL_S4);
+    fclose(f);
+    free(w);
+    free_pack(EVAL_C10);
+    free_pack(EVAL_S10);
+    free_pack(EVAL_C9);
+    free_pack(EVAL_S8);
+    free_pack(EVAL_S7);
+    free_pack(EVAL_S6);
+    free_pack(EVAL_S5);
+    free_pack(EVAL_S4);
 
-	/*if (version == 3 && release == 2 && build == 5)*/ {
-		EVAL_A = -0.10026799, EVAL_B = 0.31027733, EVAL_C = -0.57772603;
-		EVAL_a = 0.07585621, EVAL_b = 1.16492647, EVAL_c = 5.4171698;
-	}
+    /*if (version == 3 && release == 2 && build == 5)*/ {
+        EVAL_A = -0.10026799, EVAL_B = 0.31027733, EVAL_C = -0.57772603;
+        EVAL_a = 0.07585621, EVAL_b = 1.16492647, EVAL_c = 5.4171698;
+    }
 
-	info("<Evaluation function weights version %u.%u.%u loaded>\n", version, release, build);
+    info("<Evaluation function weights version %u.%u.%u loaded>\n", version, release, build);
 }
 
 /**
@@ -1120,36 +1176,36 @@ int32_t hsum_epi32(__m256i v)
 
 /**
  * @brief Accumulate linear feature weights and FM second-order interaction
- *        terms into an unscaled sum.
+ * terms into an unscaled sum.
  *
  * @param eval Evaluation data.
  * @return Unscaled accumulated sum, to be further processed into an evaluation score.
  */
 int eval_accumulate(const Eval *eval) 
 {
-	const uint32_t *o = WEIGHT_OFFSET;
-	const int16_t *w0 = EVAL_WEIGHT[eval->ply][eval->player];
-	const int16_t *w1 = w0 + o[1], *w2 = w0 + o[2], *w3 = w0 + o[3], *w4 = w0 + o[4];
-	const uint16_t *f = eval->feature[eval->ply].v1;
-	int sum;
+    const uint32_t *o = WEIGHT_OFFSET;
+    const int16_t *w0 = EVAL_WEIGHT[eval->ply][eval->player];
+    const int16_t *w1 = w0 + o[1], *w2 = w0 + o[2], *w3 = w0 + o[3], *w4 = w0 + o[4];
+    const uint16_t *f = eval->feature[eval->ply].v1;
+    int sum;
 
-	sum = w0[f[ 0]] + w0[f[ 1]] + w0[f[ 2]] + w0[f[ 3]]
-	    + w1[f[ 4]] + w1[f[ 5]] + w1[f[ 6]] + w1[f[ 7]]
-	    + w2[f[ 8]] + w2[f[ 9]] + w2[f[10]] + w2[f[11]]
-	    + w3[f[12]] + w3[f[13]] + w3[f[14]] + w3[f[15]]
-	    + w4[f[16]] + w4[f[17]] + w4[f[18]] + w4[f[19]]
-	    + w4[f[20]] + w4[f[21]] + w4[f[22]] + w4[f[23]]
-	    + w4[f[24]] + w4[f[25]] + w4[f[26]] + w4[f[27]]
-	    + w4[f[28]] + w4[f[29]]
-	    + w4[f[30]] + w4[f[31]] + w4[f[32]] + w4[f[33]]
-	    + w4[f[34]] + w4[f[35]] + w4[f[36]] + w4[f[37]]
-	    + w4[f[38]] + w4[f[39]] + w4[f[40]] + w4[f[41]]
-	    + w4[f[42]] + w4[f[43]] + w4[f[44]] + w4[f[45]]
-	    + w4[f[46]];
+    sum = w0[f[ 0]] + w0[f[ 1]] + w0[f[ 2]] + w0[f[ 3]]
+        + w1[f[ 4]] + w1[f[ 5]] + w1[f[ 6]] + w1[f[ 7]]
+        + w2[f[ 8]] + w2[f[ 9]] + w2[f[10]] + w2[f[11]]
+        + w3[f[12]] + w3[f[13]] + w3[f[14]] + w3[f[15]]
+        + w4[f[16]] + w4[f[17]] + w4[f[18]] + w4[f[19]]
+        + w4[f[20]] + w4[f[21]] + w4[f[22]] + w4[f[23]]
+        + w4[f[24]] + w4[f[25]] + w4[f[26]] + w4[f[27]]
+        + w4[f[28]] + w4[f[29]]
+        + w4[f[30]] + w4[f[31]] + w4[f[32]] + w4[f[33]]
+        + w4[f[34]] + w4[f[35]] + w4[f[36]] + w4[f[37]]
+        + w4[f[38]] + w4[f[39]] + w4[f[40]] + w4[f[41]]
+        + w4[f[42]] + w4[f[43]] + w4[f[44]] + w4[f[45]]
+        + w4[f[46]];
 
     // FM interaction term
     const int8_t* latent_vector = EVAL_LATENT_VECTOR[eval->player];
-	int64_t interaction = 0;
+    int64_t interaction = 0;
 
 #if USE_SIMD && defined(__AVX512F__) && defined(__AVX512BW__) && EVAL_LATENT_VECTOR_DIM % 32 == 0
 
@@ -1164,18 +1220,32 @@ int eval_accumulate(const Eval *eval)
         sq_sum_acc[i] = _mm512_setzero_si512();
     }
 
-    for(int32_t i = 0; i < EVAL_N_FEATURE - 1; i++){
-        uint16_t feature = f[i] - FEATURE_OFFSET[i];
-        const __m256i* lv_8 = (const __m256i*)(latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM);
-        
-        for(int32_t j = 0; j < NUM_CHUNKS; j++){
-            const __m512i lv_16 = _mm512_cvtepi8_epi16(lv_8[j]);
+    int feature_idx = 0;
 
-            sum_acc[j] = _mm512_add_epi16(sum_acc[j], lv_16);
+#if defined(__clang__)
+    #pragma clang loop unroll(full)
+#elif defined(__GNUC__)
+    #pragma GCC unroll 12
+#endif
+    for (int p = 0; p < NUM_PATTERN_TYPES; p++) {
+        int num_syms = PATTERN_NUM_SYMS[p];
+        if (ACTIVE_FM_PATTERNS[p]) {    // This if-block will be optimized away when compiled with clang -O3.
+            for (int s = 0; s < num_syms; s++) {
+                int i = feature_idx + s;
+                uint16_t feature = f[i] - FEATURE_OFFSET[i];
+                const __m256i* lv_8 = (const __m256i*)(latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM);
+                
+                for(int32_t j = 0; j < NUM_CHUNKS; j++){
+                    const __m512i lv_16 = _mm512_cvtepi8_epi16(lv_8[j]);
 
-            const __m512i sq_pair = _mm512_madd_epi16(lv_16, lv_16);
-            sq_sum_acc[j] = _mm512_add_epi32(sq_sum_acc[j], sq_pair);
+                    sum_acc[j] = _mm512_add_epi16(sum_acc[j], lv_16);
+
+                    const __m512i sq_pair = _mm512_madd_epi16(lv_16, lv_16);
+                    sq_sum_acc[j] = _mm512_add_epi32(sq_sum_acc[j], sq_pair);
+                }
+            }
         }
+        feature_idx += num_syms;
     }
 
     int32_t sum_sq = 0;
@@ -1209,78 +1279,105 @@ int eval_accumulate(const Eval *eval)
 #elif USE_SIMD && defined __AVX2__ && EVAL_LATENT_VECTOR_DIM % 16 == 0
 
     const int32_t CHUNK_SIZE = 16;
-	const int32_t NUM_CHUNKS = EVAL_LATENT_VECTOR_DIM / CHUNK_SIZE;
+    const int32_t NUM_CHUNKS = EVAL_LATENT_VECTOR_DIM / CHUNK_SIZE;
 
-	__m256i sum_acc[NUM_CHUNKS];
-	__m256i sq_sum_acc[NUM_CHUNKS];
+    __m256i sum_acc[NUM_CHUNKS];
+    __m256i sq_sum_acc[NUM_CHUNKS];
 
-	for(int32_t i = 0; i < NUM_CHUNKS; i++)
-	{
-		sum_acc[i] = _mm256_setzero_si256();
-		sq_sum_acc[i] = _mm256_setzero_si256();
-	}
+    for(int32_t i = 0; i < NUM_CHUNKS; i++)
+    {
+        sum_acc[i] = _mm256_setzero_si256();
+        sq_sum_acc[i] = _mm256_setzero_si256();
+    }
 
-	for(int32_t i = 0; i < EVAL_N_FEATURE - 1; i++){
-		uint16_t feature = f[i] - FEATURE_OFFSET[i];
-		const __m128i* lv_8 = (const __m128i*)(latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM);
+    int feature_idx = 0;
+    
+#if defined(__clang__)
+    #pragma clang loop unroll(full)
+#elif defined(__GNUC__)
+    #pragma GCC unroll 12
+#endif
+    for (int p = 0; p < NUM_PATTERN_TYPES; p++) {
+        int num_syms = PATTERN_NUM_SYMS[p];
+        if (ACTIVE_FM_PATTERNS[p]) {
+            for (int s = 0; s < num_syms; s++) {
+                int i = feature_idx + s;
+                uint16_t feature = f[i] - FEATURE_OFFSET[i];
+                const __m128i* lv_8 = (const __m128i*)(latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM);
 
-		for(int32_t j = 0; j < NUM_CHUNKS; j++){
-			const __m256i lv_16 = _mm256_cvtepi8_epi16(lv_8[j]);
-			sum_acc[j] = _mm256_add_epi16(sum_acc[j], lv_16);
+                for(int32_t j = 0; j < NUM_CHUNKS; j++){
+                    const __m256i lv_16 = _mm256_cvtepi8_epi16(lv_8[j]);
+                    sum_acc[j] = _mm256_add_epi16(sum_acc[j], lv_16);
 
-			const __m256i sq_pair = _mm256_madd_epi16(lv_16, lv_16);
-			sq_sum_acc[j] = _mm256_add_epi32(sq_sum_acc[j], sq_pair);
-		}
-	}
+                    const __m256i sq_pair = _mm256_madd_epi16(lv_16, lv_16);
+                    sq_sum_acc[j] = _mm256_add_epi32(sq_sum_acc[j], sq_pair);
+                }
+            }
+        }
+        feature_idx += num_syms;
+    }
 
     int32_t sum_sq = 0, sq_sum = 0;
-	for(int32_t i = 0; i < NUM_CHUNKS; i++){
-		const __m256i sum_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(sum_acc[i]));
-		const __m256i sum_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(sum_acc[i], 1));
+    for(int32_t i = 0; i < NUM_CHUNKS; i++){
+        const __m256i sum_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(sum_acc[i]));
+        const __m256i sum_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(sum_acc[i], 1));
 
-		const __m256i sum_sq_lo = _mm256_mullo_epi32(sum_lo, sum_lo);
-		const __m256i sum_sq_hi = _mm256_mullo_epi32(sum_hi, sum_hi);
+        const __m256i sum_sq_lo = _mm256_mullo_epi32(sum_lo, sum_lo);
+        const __m256i sum_sq_hi = _mm256_mullo_epi32(sum_hi, sum_hi);
 
-		sum_sq += hsum_epi32(sum_sq_lo) + hsum_epi32(sum_sq_hi);
-		sq_sum += hsum_epi32(sq_sum_acc[i]);
-	}
+        sum_sq += hsum_epi32(sum_sq_lo) + hsum_epi32(sum_sq_hi);
+        sq_sum += hsum_epi32(sq_sum_acc[i]);
+    }
 
-	interaction = sum_sq - sq_sum;
+    interaction = sum_sq - sq_sum;
 
 #else
 
     int32_t sum_acc[EVAL_LATENT_VECTOR_DIM];
     int32_t sq_sum_acc[EVAL_LATENT_VECTOR_DIM];
 
-	for(int32_t i = 0; i < EVAL_LATENT_VECTOR_DIM; i++){
-		sum_acc[i] = 0;
-		sq_sum_acc[i] = 0;
-	}
+    for(int32_t i = 0; i < EVAL_LATENT_VECTOR_DIM; i++){
+        sum_acc[i] = 0;
+        sq_sum_acc[i] = 0;
+    }
 
-	for(int32_t i = 0; i < EVAL_N_FEATURE - 1; i++){
-		uint16_t feature = f[i] - FEATURE_OFFSET[i];
-		const int8_t* lv = latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM;
-		for(int32_t j = 0; j < EVAL_LATENT_VECTOR_DIM; j++){
-			sum_acc[j] += lv[j];
-			sq_sum_acc[j] += lv[j] * lv[j];
-		}
-	}
+    int feature_idx = 0;
+
+#if defined(__clang__)
+    #pragma clang loop unroll(full)
+#elif defined(__GNUC__)
+    #pragma GCC unroll 12
+#endif
+    for (int p = 0; p < NUM_PATTERN_TYPES; p++) {
+        int num_syms = PATTERN_NUM_SYMS[p];
+        if (ACTIVE_FM_PATTERNS[p]) {
+            for (int s = 0; s < num_syms; s++) {
+                int i = feature_idx + s;
+                uint16_t feature = f[i] - FEATURE_OFFSET[i];
+                const int8_t* lv = latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM;
+                for(int32_t j = 0; j < EVAL_LATENT_VECTOR_DIM; j++){
+                    sum_acc[j] += lv[j];
+                    sq_sum_acc[j] += lv[j] * lv[j];
+                }
+            }
+        }
+        feature_idx += num_syms;
+    }
 
     int32_t sum_sq = 0, sq_sum = 0;
-	for(int32_t i = 0; i < EVAL_LATENT_VECTOR_DIM; i++){
-		sum_sq += sum_acc[i] * sum_acc[i];
-		sq_sum += sq_sum_acc[i];
-	}
+    for(int32_t i = 0; i < EVAL_LATENT_VECTOR_DIM; i++){
+        sum_sq += sum_acc[i] * sum_acc[i];
+        sq_sum += sq_sum_acc[i];
+    }
 
-	interaction = sum_sq - sq_sum;
+    interaction = sum_sq - sq_sum;
     
 #endif
 
     interaction *= 128;
     interaction /= (EVAL_QUANT_SCALE_LATENT_VECTOR * EVAL_QUANT_SCALE_LATENT_VECTOR * 2);
-	return sum + interaction;
+    return sum + interaction;
 }
-
 
 /**
  * @brief Compute the error-type of the evaluation function according to the

@@ -75,6 +75,9 @@ int main(int argc, char **argv)
 	char *wthor_file = NULL;
 	char *count_type = NULL;
 	int n_bench = 0;
+    int bench_min_empties = -1; 
+	int bench_max_empties = -1; int 
+    bench_depth = -1; 
 	bool test = false;
 
 	// options.n_task default to system cpu number
@@ -101,6 +104,9 @@ int main(int argc, char **argv)
 		else if (strcmp(arg, "solve") == 0 && argv[i + 1]) problem_file = argv[++i];
 		else if (strcmp(arg, "wtest") == 0 && argv[i + 1]) wthor_file = argv[++i];
 		else if (strcmp(arg, "bench") == 0 && argv[i + 1]) n_bench = atoi(argv[++i]);
+        else if (strcmp(arg, "bench_min_empties") == 0 && argv[i + 1]) bench_min_empties = atoi(argv[++i]); 
+		else if (strcmp(arg, "bench_max_empties") == 0 && argv[i + 1]) bench_max_empties = atoi(argv[++i]); 
+        else if (strcmp(arg, "bench_depth") == 0 && argv[i + 1]) bench_depth = atoi(argv[++i]); 
 		else if (strcmp(arg, "test") == 0) test = true;
 		else if (strcmp(arg, "count") == 0 && argv[i + 1]) {
 			count_type = argv[++i];
@@ -129,7 +135,7 @@ int main(int argc, char **argv)
 		if (options.verbosity) version();
 		if (problem_file) obf_test(&search, problem_file, NULL);
 		if (wthor_file) wthor_test(wthor_file, &search);
-		if (n_bench) obf_speed(&search, n_bench);
+		if (n_bench) obf_speed(&search, n_bench, bench_min_empties, bench_max_empties, bench_depth);
 		HASH_STATS(printf("pv_table     : %12llu stores %12llu probes %12llu found probes\n", search.pv_table.n_store, search.pv_table.n_try, search.pv_table.n_found);)
 		HASH_STATS(printf("hash_table   : %12llu stores %12llu probes %12llu found probes\n", search.hash_table.n_store, search.hash_table.n_try, search.hash_table.n_found);)
 		HASH_STATS(printf("shallow_table: %12llu stores %12llu probes %12llu found probes\n", search.shallow_table.n_store, search.shallow_table.n_try, search.shallow_table.n_found);)

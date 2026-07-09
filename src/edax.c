@@ -544,7 +544,7 @@ void ui_loop_edax(UI *ui)
 			// bench (a serie of low level tests).
 			} else if (strcmp(cmd, "bench") == 0) {
 				int n = string_to_int(param, -1); BOUND(n, -1, 100, "n_problems");
-				obf_speed(&play->search, n);
+				obf_speed(&play->search, n, -1, -1, -1);
 
 			// wtest test the engine against wthor theoretical scores
 			} else if (strcmp(cmd, "wtest") == 0) {

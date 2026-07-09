@@ -494,7 +494,7 @@ void obf_filter(const char *input_file, const char *output_file)
  * @brief Test edax speed by running for at least 1 minutes on problems deeper and deeper.
  * @param search Search.
  */
-void obf_speed(Search *search, const int n)
+void obf_speed(Search *search, const int n, int min_empties, int max_empties, int depth)
 {
 	int i;
 	uint64_t t = real_clock();
@@ -507,7 +507,13 @@ void obf_speed(Search *search, const int n)
 	obf.best_score = -SCORE_INF;
 
 	random_seed(&r, 42);
-	options.level = 60;
+
+    if (depth >= 0) {
+		options.level = depth; 
+	} else {
+		options.level = 60;          
+	}
+
 	search_set_observer(search, search_observer);
 	search->options.verbosity = (options.verbosity == 1 ? 0 : options.verbosity);
 	options.width -= 4;
@@ -518,7 +524,26 @@ void obf_speed(Search *search, const int n)
 	}
 
 	for (i = 0; n == - 1 ? real_clock() - t < 60000 : i < n; ++i) {
-		const int ply = MAX(30, 40 - i / 5);
+		int ply;
+		
+		if (min_empties >= 0 || max_empties >= 0) {
+			int min_e = min_empties >= 0 ? min_empties : max_empties;
+			int max_e = max_empties >= 0 ? max_empties : min_empties;
+			if (min_e > max_e) {
+				int tmp = min_e; min_e = max_e; max_e = tmp;
+			}
+			
+			int min_ply = 60 - max_e;
+			int max_ply = 60 - min_e;
+			if (min_ply < 0) min_ply = 0;
+			if (max_ply > 60) max_ply = 60;
+			
+			int range = max_ply - min_ply + 1;
+			ply = min_ply + (random_get(&r) % range);
+		} else {
+			ply = MAX(30, 40 - i / 5);
+		}
+
 		obf.player = ply & 1;
 		board_rand(&obf.board, ply, &r);
 		obf_search(search, &obf, i + 1);
