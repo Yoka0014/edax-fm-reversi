@@ -534,8 +534,12 @@ static const uint32_t FEATURE_OFFSET[] = {
 /** number of (unpacked) weights */
 static const uint32_t EVAL_N_WEIGHT = 226315;
 
-/** dimension of a latent vector (defined as a macro to allow use in preprocessor directives) */
+/** dimension of a latent vector (defined as a macro to allow use in preprocessor directives).
+ *  Overridable at build time, e.g. `DFLAGS=-DEVAL_LATENT_VECTOR_DIM=8`. 0 disables the FM
+ *  interaction term entirely, degenerating to the original, stock-Edax-compatible linear model. */
+#ifndef EVAL_LATENT_VECTOR_DIM
 #define EVAL_LATENT_VECTOR_DIM 32
+#endif
 
 /** number of FM phases */
 #define EVAL_N_FM_PHASE 1
@@ -816,6 +820,7 @@ void eval_open(const char* file)
         EVAL_WEIGHT[ply][1][j + 1] = 0;
     }
 
+#if EVAL_LATENT_VECTOR_DIM > 0
     EVAL_N_LATENT_VECTOR = 0;
     int f_idx = 0;
     for (int p = 0; p < NUM_PATTERN_TYPES; p++) {
@@ -827,7 +832,7 @@ void eval_open(const char* file)
             }
         } else {
             for (int s = 0; s < num_syms; s++) {
-                LATENT_VECTOR_OFFSET[f_idx + s] = 0; 
+                LATENT_VECTOR_OFFSET[f_idx + s] = 0;
             }
         }
         f_idx += num_syms;
@@ -851,7 +856,7 @@ void eval_open(const char* file)
     }
 
     uint32_t power3[] = {1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683, 59049 };
-    
+
     for (int phase = 0; phase < EVAL_N_FM_PHASE; phase++) {
         f_idx = 0;
         for(int p = 0; p < NUM_PATTERN_TYPES; p++)
@@ -875,6 +880,16 @@ void eval_open(const char* file)
             f_idx += num_syms;
         }
     }
+#else
+    // K=0: no FM term at all -- original, stock-Edax-compatible linear model. The linear weight
+    // read loop above already consumed exactly a stock (non-FM) eval.dat, so leave the stream
+    // untouched and just null out the (unused) latent vector tables; eval_close()'s unconditional
+    // free() accepts NULL.
+    for (int phase = 0; phase < EVAL_N_FM_PHASE; phase++) {
+        EVAL_LATENT_VECTOR[0][phase] = NULL;
+        EVAL_LATENT_VECTOR[1][phase] = NULL;
+    }
+#endif
 
     fclose(f);
     free(w);
@@ -1213,18 +1228,28 @@ int32_t hsum_epi32(__m256i v)
 }
 #endif
 
-#if USE_SIMD && defined(__AVX512F__) && defined(__AVX512BW__)
-    #include "eval_fm_avx512.c"
-#elif USE_SIMD && defined(__AVX2__)
-    #include "eval_fm_avx2.c"
-#elif USE_SIMD && defined(__SSE2__)
-    #include "eval_fm_sse.c"
+#if EVAL_LATENT_VECTOR_DIM >= 8
+    #if USE_SIMD && defined(__AVX512F__) && defined(__AVX512BW__)
+        #include "eval_fm_avx512.c"
+    #elif USE_SIMD && defined(__AVX2__)
+        #include "eval_fm_avx2.c"
+    #elif USE_SIMD && defined(__SSE2__)
+        #include "eval_fm_sse.c"
+    #endif
 #endif
 
 /**
  * @brief Scalar fallback for the FM second-order interaction term (any
  * EVAL_LATENT_VECTOR_DIM, no SIMD required).
  */
+#if EVAL_LATENT_VECTOR_DIM == 0
+static int64_t eval_fm_scalar(const int8_t *latent_vector, const uint16_t *f)
+{
+    (void)latent_vector;
+    (void)f;
+    return 0;
+}
+#else
 static int64_t eval_fm_scalar(const int8_t *latent_vector, const uint16_t *f)
 {
     int32_t sum_acc[EVAL_LATENT_VECTOR_DIM];
@@ -1262,6 +1287,7 @@ static int64_t eval_fm_scalar(const int8_t *latent_vector, const uint16_t *f)
 
     return (int64_t)sum_sq - (int64_t)sq_sum;
 }
+#endif
 
 /**
  * @brief Accumulate linear feature weights and FM second-order interaction
@@ -1297,11 +1323,11 @@ int eval_accumulate(const Eval *eval)
     const int8_t* latent_vector = EVAL_LATENT_VECTOR[eval->player][fm_phase];
     int64_t interaction;
 
-#if USE_SIMD && defined(__AVX512F__) && defined(__AVX512BW__)
+#if EVAL_LATENT_VECTOR_DIM >= 8 && USE_SIMD && defined(__AVX512F__) && defined(__AVX512BW__)
     interaction = eval_fm_avx512(latent_vector, f);
-#elif USE_SIMD && defined(__AVX2__)
+#elif EVAL_LATENT_VECTOR_DIM >= 8 && USE_SIMD && defined(__AVX2__)
     interaction = eval_fm_avx2(latent_vector, f);
-#elif USE_SIMD && defined(__SSE2__)
+#elif EVAL_LATENT_VECTOR_DIM >= 8 && USE_SIMD && defined(__SSE2__)
     interaction = eval_fm_sse(latent_vector, f);
 #else
     interaction = eval_fm_scalar(latent_vector, f);

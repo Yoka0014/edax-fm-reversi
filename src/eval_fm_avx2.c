@@ -9,19 +9,25 @@
  * EVAL_LATENT_VECTOR_DIM, UNROLL_PATTERN_LOOP and hsum_epi32(), all already
  * defined earlier in eval.c.
  *
+ * Handles any EVAL_LATENT_VECTOR_DIM >= 8: rows are processed in full
+ * 16-byte (one 256-bit register after widening to int16) chunks. AVX2 has no
+ * byte-granular masked load, so a trailing partial chunk is instead copied
+ * into a zero-initialized 16-byte stack buffer (real bytes only) before
+ * loading from there. The `REMAINDER` guarding this fallback is a
+ * compile-time constant that is 0 whenever EVAL_LATENT_VECTOR_DIM is an
+ * exact multiple of 16, so the optimizer removes the whole buffer/memcpy
+ * branch in that case, degenerating to the previous fixed-size "native tier"
+ * implementation for e.g. the default dim=32.
+ *
  * @date 2026
  * @author Yuichiro Okashita
  */
 
 static int64_t eval_fm_avx2(const int8_t *latent_vector, const uint16_t *f)
 {
-    int64_t interaction;
-
-#if EVAL_LATENT_VECTOR_DIM >= 16 && EVAL_LATENT_VECTOR_DIM % 16 == 0
-    // Native tier: one feature's full row fits (a multiple of) the 256-bit register exactly.
-    // This also transparently covers EVAL_LATENT_VECTOR_DIM == 32, 64, ... (NUM_CHUNKS = k/16).
     const int32_t CHUNK_SIZE = 16;
-    const int32_t NUM_CHUNKS = EVAL_LATENT_VECTOR_DIM / CHUNK_SIZE;
+    const int32_t NUM_CHUNKS = (EVAL_LATENT_VECTOR_DIM + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    const int32_t REMAINDER = EVAL_LATENT_VECTOR_DIM % CHUNK_SIZE;
 
     __m256i sum_acc[NUM_CHUNKS];
     __m256i sq_sum_acc[NUM_CHUNKS];
@@ -41,10 +47,22 @@ static int64_t eval_fm_avx2(const int8_t *latent_vector, const uint16_t *f)
             for (int s = 0; s < num_syms; s++) {
                 int i = feature_idx + s;
                 uint16_t feature = f[i] - FEATURE_OFFSET[i];
-                const __m128i* lv_8 = (const __m128i*)(latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM);
+                const int8_t *row = latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM;
 
                 for (int32_t j = 0; j < NUM_CHUNKS; j++) {
-                    const __m256i lv_16 = _mm256_cvtepi8_epi16(lv_8[j]);
+                    __m128i bytes16;
+                    if (REMAINDER != 0 && j == NUM_CHUNKS - 1) {
+                        // Partial trailing chunk: zero-pad into a scratch buffer so the missing
+                        // lanes contribute 0 to both accumulators below -- no special-casing
+                        // needed in the reduction. Dead branch (REMAINDER a compile-time constant
+                        // 0) whenever EVAL_LATENT_VECTOR_DIM is an exact multiple of 16.
+                        int8_t buf[16] = {0};
+                        memcpy(buf, row + j * CHUNK_SIZE, REMAINDER);
+                        bytes16 = _mm_loadu_si128((const __m128i*)buf);
+                    } else {
+                        bytes16 = _mm_loadu_si128((const __m128i*)(row + j * CHUNK_SIZE));
+                    }
+                    const __m256i lv_16 = _mm256_cvtepi8_epi16(bytes16);
                     sum_acc[j] = _mm256_add_epi16(sum_acc[j], lv_16);
 
                     const __m256i sq_pair = _mm256_madd_epi16(lv_16, lv_16);
@@ -67,56 +85,5 @@ static int64_t eval_fm_avx2(const int8_t *latent_vector, const uint16_t *f)
         sq_sum += hsum_epi32(sq_sum_acc[i]);
     }
 
-    interaction = (int64_t)sum_sq - (int64_t)sq_sum;
-
-#elif EVAL_LATENT_VECTOR_DIM >= 8 && EVAL_LATENT_VECTOR_DIM < 16 && EVAL_LATENT_VECTOR_DIM % 8 == 0
-    // PACK=2: two features' 8-byte rows packed side by side into one 256-bit register.
-    // PATTERN_NUM_SYMS[p] (4, or 2 for DIAG_8) is always even, so pairing s,s+1 within a single
-    // pattern type's own loop always divides evenly -- no padding ever needed.
-    __m256i sum_acc = _mm256_setzero_si256();
-    __m256i sq_sum_acc = _mm256_setzero_si256();
-
-    int feature_idx = 0;
-
-    UNROLL_PATTERN_LOOP
-    for (int p = 0; p < NUM_PATTERN_TYPES; p++) {
-        int num_syms = PATTERN_NUM_SYMS[p];
-        if (ACTIVE_FM_PATTERNS[p]) {
-            for (int pair = 0; pair < num_syms / 2; pair++) {
-                int i0 = feature_idx + 2 * pair, i1 = i0 + 1;
-                uint16_t feat0 = f[i0] - FEATURE_OFFSET[i0], feat1 = f[i1] - FEATURE_OFFSET[i1];
-                const void *row0 = latent_vector + (LATENT_VECTOR_OFFSET[i0] + feat0) * EVAL_LATENT_VECTOR_DIM;
-                const void *row1 = latent_vector + (LATENT_VECTOR_OFFSET[i1] + feat1) * EVAL_LATENT_VECTOR_DIM;
-
-                __m128i r0 = _mm_loadl_epi64((const __m128i*)row0);
-                __m128i r1 = _mm_loadl_epi64((const __m128i*)row1);
-                __m128i combined = _mm_unpacklo_epi64(r0, r1);        // 16 bytes: row0 | row1
-                __m256i lv_16 = _mm256_cvtepi8_epi16(combined);       // widen -> 16 int16 lanes
-
-                sum_acc = _mm256_add_epi16(sum_acc, lv_16);
-                sq_sum_acc = _mm256_add_epi32(sq_sum_acc, _mm256_madd_epi16(lv_16, lv_16));
-            }
-        }
-        feature_idx += num_syms;
-    }
-
-    // 2-way fold of sum_acc's two 8-lane slots into the true per-dimension total.
-    // sq_sum_acc needs no fold: madd_epi16 only ever pairs adjacent lanes within a single
-    // feature's contiguous k lanes, so it already gives the exact grand total regardless of packing.
-    __m128i sa_lo = _mm256_castsi256_si128(sum_acc);
-    __m128i sa_hi = _mm256_extracti128_si256(sum_acc, 1);
-    __m128i folded16 = _mm_add_epi16(sa_lo, sa_hi);
-
-    __m256i folded32 = _mm256_cvtepi16_epi32(folded16);
-    __m256i sq32 = _mm256_mullo_epi32(folded32, folded32);
-    int32_t sum_sq = hsum_epi32(sq32);
-    int32_t sq_sum = hsum_epi32(sq_sum_acc);
-
-    interaction = (int64_t)sum_sq - (int64_t)sq_sum;
-
-#else
-    #error "eval_fm_avx2: EVAL_LATENT_VECTOR_DIM must be a multiple of 8 and >= 8"
-#endif
-
-    return interaction;
+    return (int64_t)sum_sq - (int64_t)sq_sum;
 }

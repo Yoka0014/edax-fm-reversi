@@ -3,8 +3,8 @@
  *
  * SSE2 implementation of the FM (Factorization Machine) second-order
  * interaction term used by eval_accumulate(). Bare fragment, included only
- * from eval.c (mirrors the flip_*.c / board.c convention) -- relies on
- * eval.c's file scope for NUM_PATTERN_TYPES, PATTERN_NUM_SYMS,
+ * from eval.c (mirrors the flip_*.c / count_last_flip_*.c convention) --
+ * relies on eval.c's file scope for NUM_PATTERN_TYPES, PATTERN_NUM_SYMS,
  * ACTIVE_FM_PATTERNS, LATENT_VECTOR_OFFSET, FEATURE_OFFSET and
  * EVAL_LATENT_VECTOR_DIM/UNROLL_PATTERN_LOOP, all already defined earlier in
  * eval.c.
@@ -17,6 +17,16 @@
  * "-march=x86-64" target (which never defines __SSE4_1__) or bake an
  * illegal instruction into MSVC's maximally-compatible /D__SSE2__-only
  * build (MSVC never defines __SSE4_1__/__SSSE3__ regardless of /arch:).
+ *
+ * Handles any EVAL_LATENT_VECTOR_DIM >= 8: rows are processed in full 8-byte
+ * (one 128-bit register after widening to int16) chunks. SSE2 has no
+ * byte-granular masked load, so a trailing partial chunk is instead copied
+ * into a zero-initialized 8-byte stack buffer (real bytes only) before
+ * loading from there. The `REMAINDER` guarding this fallback is a
+ * compile-time constant that is 0 whenever EVAL_LATENT_VECTOR_DIM is an
+ * exact multiple of 8, so the optimizer removes the whole buffer/memcpy
+ * branch in that case, degenerating to the previous fixed-size
+ * implementation.
  *
  * @date 2026
  * @author Yuichiro Okashita
@@ -34,14 +44,9 @@ static int32_t hsum4_epi32_sse2(__m128i v)
 
 static int64_t eval_fm_sse(const int8_t *latent_vector, const uint16_t *f)
 {
-    int64_t interaction;
-
-#if EVAL_LATENT_VECTOR_DIM >= 8 && EVAL_LATENT_VECTOR_DIM % 8 == 0
-    // SSE's native register (128 bits = 8 int16 lanes after widening) is already the smallest
-    // requested tier, so there is no packing case here -- one unified chunked/native branch
-    // covers k=8, 16, 32, ...
     const int32_t CHUNK_SIZE = 8;
-    const int32_t NUM_CHUNKS = EVAL_LATENT_VECTOR_DIM / CHUNK_SIZE;
+    const int32_t NUM_CHUNKS = (EVAL_LATENT_VECTOR_DIM + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    const int32_t REMAINDER = EVAL_LATENT_VECTOR_DIM % CHUNK_SIZE;
 
     __m128i sum_acc[NUM_CHUNKS];
     __m128i sq_sum_acc[NUM_CHUNKS];
@@ -61,7 +66,18 @@ static int64_t eval_fm_sse(const int8_t *latent_vector, const uint16_t *f)
                 uint16_t feature = f[i] - FEATURE_OFFSET[i];
                 const int8_t *row = latent_vector + (LATENT_VECTOR_OFFSET[i] + feature) * EVAL_LATENT_VECTOR_DIM;
                 for (int32_t j = 0; j < NUM_CHUNKS; j++) {
-                    __m128i bytes8 = _mm_loadl_epi64((const __m128i*)(row + j * 8));
+                    __m128i bytes8;
+                    if (REMAINDER != 0 && j == NUM_CHUNKS - 1) {
+                        // Partial trailing chunk: zero-pad into a scratch buffer so the missing
+                        // lanes contribute 0 to both accumulators below -- no special-casing
+                        // needed in the reduction. Dead branch (REMAINDER a compile-time constant
+                        // 0) whenever EVAL_LATENT_VECTOR_DIM is an exact multiple of 8.
+                        int8_t buf[8] = {0};
+                        memcpy(buf, row + j * CHUNK_SIZE, REMAINDER);
+                        bytes8 = _mm_loadl_epi64((const __m128i*)buf);
+                    } else {
+                        bytes8 = _mm_loadl_epi64((const __m128i*)(row + j * CHUNK_SIZE));
+                    }
                     // SSE2-only sign-extend int8->int16 (no _mm_cvtepi8_epi16 / SSE4.1 needed):
                     // unpacklo_epi8(x,x) duplicates each byte into a 16-bit lane with the byte
                     // in the high half, then an arithmetic right shift by 8 sign-extends it.
@@ -76,19 +92,13 @@ static int64_t eval_fm_sse(const int8_t *latent_vector, const uint16_t *f)
 
     int32_t sum_sq = 0, sq_sum = 0;
     for (int32_t j = 0; j < NUM_CHUNKS; j++) {
-        // sum_acc[j] already IS the true per-dimension total (PACK=1, no fold needed here).
-        // Its magnitude (<= ~46*127 ~= 5842) fits comfortably in int16, so madd_epi16(v,v)
-        // directly computes per-dimension squares summed pairwise -- summing all the
-        // resulting pairs gives sum_sq exactly, with no separate widen/mullo step needed.
+        // sum_acc[j] already IS the true per-dimension total (one row-slice per lane, no
+        // cross-feature packing). Its magnitude (<= ~46*127 ~= 5842) fits comfortably in int16,
+        // so madd_epi16(v,v) directly computes per-dimension squares summed pairwise -- summing
+        // all the resulting pairs gives sum_sq exactly, with no separate widen/mullo step needed.
         sum_sq += hsum4_epi32_sse2(_mm_madd_epi16(sum_acc[j], sum_acc[j]));
         sq_sum += hsum4_epi32_sse2(sq_sum_acc[j]);
     }
 
-    interaction = (int64_t)sum_sq - (int64_t)sq_sum;
-
-#else
-    #error "eval_fm_sse: EVAL_LATENT_VECTOR_DIM must be a multiple of 8 and >= 8"
-#endif
-
-    return interaction;
+    return (int64_t)sum_sq - (int64_t)sq_sum;
 }
