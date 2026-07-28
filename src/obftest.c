@@ -666,8 +666,6 @@ void obf_sigma_scan(Search *search, const char *input_file, const char *output_f
 		start_rung = (d & 1) ? 1 : 2;
 
 		for (rung = 0; rung <= max_rung; rung = (rung == 0 ? start_rung : rung + 2)) {
-			if (rung >= n_empties - 4) continue; // read-to-the-end region, see methodology
-
 			search_cleanup(search);
 			search_set_board(search, &board, player);
 			search->options.depth = rung;
