@@ -902,9 +902,15 @@ void eval_open(const char* file)
     free_pack(EVAL_S5);
     free_pack(EVAL_S4);
 
-    /*if (version == 3 && release == 2 && build == 5)*/ {
-        EVAL_A = -0.10026799, EVAL_B = 0.31027733, EVAL_C = -0.57772603;
-        EVAL_a = 0.07585621, EVAL_b = 1.16492647, EVAL_c = 5.4171698;
+    // probcut sigma(e,d,p) coefficients, re-fit for this fork's FM-extended (K=32) evaluation
+    // function via reservoir-sampled probcut nodes from self-play (full tier: 20000 positions,
+    // 144595 depth-pair score differences). Supersedes the original eval.dat-3.2.5 (non-FM)
+    // coefficients Richard Delorme fit for stock Edax; -solve validation showed ~41% fewer
+    // nodes at equal search level, with a small (18->19 moves, 17->22 scores out of 80 fforum
+    // positions) accuracy cost.
+    {
+        EVAL_A = -0.20402601, EVAL_B = 1.0, EVAL_C = -2.90369535;
+        EVAL_a = 0.01124211, EVAL_b = 0.37754541, EVAL_c = 5.00602665;
     }
 
     // experimental override of the probcut sigma coefficients, without a rebuild:
