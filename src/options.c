@@ -54,6 +54,7 @@ Options options = {
 	false, // all_best
 
 	NULL, // evaluation function's weights file.
+	NULL, // probcut sigma coefficients override
 
 	NULL, // book file
 	true,            // book usage allowed
@@ -113,6 +114,7 @@ void options_usage(void)
 		"  -move-time <n>                search using limited time per move.\n"
 		"  -ponder <on/off>              search during opponent time.\n"
 		"  -eval-file                    read eval weight from this file.\n"
+		"  -eval-sigma \"A B C a b c\"     override probcut sigma coefficients (see <eval-file>.sigma).\n"
 		"  -book-file                    load opening book from this file.\n"
 		"  -book-usage <on/off>          play from the opening book.\n"
 		"  -book-randomness <n>          play various but worse moves from the opening book.\n"
@@ -203,6 +205,8 @@ int options_read(const char *option, const char *value)
 		else if (strcmp(option, "game-file") == 0) options.game_file = string_duplicate(value);
 
 		else if (strcmp(option, "eval-file") == 0) options.eval_file = string_duplicate(value);
+
+		else if (strcmp(option, "eval-sigma") == 0) options.eval_sigma = string_duplicate(value);
 
 		else if (strcmp(option, "book-file") == 0) options.book_file = string_duplicate(value);
 		else if (strcmp(option, "book-usage") == 0) parse_boolean(value, &options.book_allowed);
@@ -410,5 +414,6 @@ void options_free(void)
 	free(options.name);
 	free(options.book_file);
 	free(options.eval_file);
+	free(options.eval_sigma);
 }
 

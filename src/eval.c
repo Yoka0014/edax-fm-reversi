@@ -907,7 +907,34 @@ void eval_open(const char* file)
         EVAL_a = 0.07585621, EVAL_b = 1.16492647, EVAL_c = 5.4171698;
     }
 
+    // experimental override of the probcut sigma coefficients, without a rebuild:
+    // a "<eval_file>.sigma" sidecar text file (if present) beats the hardcoded default above,
+    // and "-eval-sigma" (if given) beats the sidecar file. See eval-sigma-refit-plan memory.
+    {
+        char sigma_path[FILENAME_MAX];
+        FILE *sigma_f;
+
+        snprintf(sigma_path, sizeof sigma_path, "%s.sigma", file);
+        sigma_f = fopen(sigma_path, "r");
+        if (sigma_f) {
+            double A, B, C, a, b, c;
+            if (fscanf(sigma_f, "%lf %lf %lf %lf %lf %lf", &A, &B, &C, &a, &b, &c) == 6) {
+                EVAL_A = A; EVAL_B = B; EVAL_C = C; EVAL_a = a; EVAL_b = b; EVAL_c = c;
+            }
+            fclose(sigma_f);
+        }
+
+        if (options.eval_sigma) {
+            double A, B, C, a, b, c;
+            if (sscanf(options.eval_sigma, "%lf %lf %lf %lf %lf %lf", &A, &B, &C, &a, &b, &c) == 6) {
+                EVAL_A = A; EVAL_B = B; EVAL_C = C; EVAL_a = a; EVAL_b = b; EVAL_c = c;
+            }
+        }
+    }
+
     info("<Evaluation function weights version %u.%u.%u loaded>\n", version, release, build);
+    info("<probcut sigma coefficients: A=%.8g B=%.8g C=%.8g a=%.8g b=%.8g c=%.8g>\n",
+        EVAL_A, EVAL_B, EVAL_C, EVAL_a, EVAL_b, EVAL_c);
 }
 
 /**

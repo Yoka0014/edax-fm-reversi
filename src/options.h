@@ -56,6 +56,7 @@ typedef struct {
 	bool all_best;                        /**< search for all best moves when solving problem */
 
 	char *eval_file;                      /**< evaluation file */
+	char *eval_sigma;                     /**< probcut sigma coefficients "A B C a b c" override (NULL = use file/default) */
 
 	char *book_file;                      /**< opening book filename */
 	bool book_allowed;                    /**< switch to use or not the opening book*/

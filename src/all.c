@@ -31,6 +31,7 @@
 
 /* miscellaneous tests */
 #include "perft.c"
+#include "sigma_probe.c"
 #include "obftest.c"
 #include "histogram.c"
 

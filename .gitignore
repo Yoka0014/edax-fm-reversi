@@ -20,3 +20,7 @@ bcnttest.*
 compile_flags.txt
 
 CLAUDE.md
+
+selfplay_data/*
+scripts/*
+experiments/*

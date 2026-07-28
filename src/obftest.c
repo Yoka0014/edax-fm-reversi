@@ -23,6 +23,7 @@
 #include "options.h"
 #include "const.h"
 #include "settings.h"
+#include "sigma_probe.h"
 
 #include <inttypes.h>
 #include <stdint.h>
@@ -561,4 +562,122 @@ void obf_speed(Search *search, const int n, int min_empties, int max_empties, in
 	options.level = level;
 	options.width += 4;
 
+}
+
+/**
+ * @brief Self-play games, sampling probcut nodes as they fire during search.
+ *
+ * Plays n_games self-play games starting from a short random opening. Every
+ * probcut invocation during these searches is fed to the sigma_probe module
+ * (see sigma_probe.h/.c), which reservoir-samples a fixed number of the
+ * resulting nodes and tallies a (n_empties, depth, probcut_depth) histogram.
+ * Both are written to disk at the end of the run. Used to collect data for
+ * re-fitting eval_sigma()'s 6 coefficients (see the eval-sigma-refit-plan).
+ *
+ * @param search Search.
+ * @param n_games Number of self-play games to run.
+ * @param opening_plies Number of random moves to play before self-play starts.
+ * @param reservoir_size Number of sampled nodes to keep.
+ * @param seed Seed for the reservoir sampling RNG (independent of game randomness).
+ * @param reservoir_file Output file for the sampled nodes (OBF board + depth per line).
+ * @param histogram_file Output file for the (n_empties, depth, probcut_depth) counts.
+ */
+void obf_sigma_probe(Search *search, int n_games, int opening_plies, int reservoir_size,
+                      uint64_t seed, const char *reservoir_file, const char *histogram_file)
+{
+	Random r;
+	int i;
+
+	random_seed(&r, seed ^ 0x5eed5eedULL);
+	sigma_probe_start(reservoir_size, seed);
+
+	for (i = 0; i < n_games; ++i) {
+		Board board;
+		int player;
+
+		board_rand(&board, opening_plies, &r);
+		player = opening_plies & 1;
+
+		while (!board_is_game_over(&board)) {
+			Move move;
+
+			search_cleanup(search);
+			search_set_board(search, &board, player);
+			search_set_level(search, options.level, search->n_empties);
+			if (options.depth >= 0) search->options.depth = MIN(options.depth, search->n_empties);
+			if (options.selectivity >= 0) search->options.selectivity = options.selectivity;
+			if (options.play_type == EDAX_TIME_PER_MOVE) search_set_move_time(search, options.time);
+			else search_set_game_time(search, options.time);
+
+			search_run(search);
+
+			board_get_move(&board, search->result->move, &move);
+			board_update(&board, &move);
+			player = !player;
+		}
+
+		if ((i + 1) % 10 == 0 || i + 1 == n_games) {
+			printf("sigma-probe: %d/%d games done\n", i + 1, n_games);
+			fflush(stdout);
+		}
+	}
+
+	sigma_probe_finish(reservoir_file, histogram_file);
+}
+
+/**
+ * @brief Re-search sampled positions at depth 0 and a parity-matched depth
+ * ladder, with probcut forced off, to measure independent depth-vs-score
+ * differences for the eval_sigma() re-fit.
+ *
+ * Input lines are the reservoir_file format written by obf_sigma_probe():
+ * an OBF board string followed by ';' and the depth the node was sampled at.
+ *
+ * @param search Search.
+ * @param input_file File of sampled positions (board;depth per line).
+ * @param output_file Output file, one line per (position, rung):
+ *        "position_id n_empties depth score".
+ * @param dmax Maximum rung depth to search (deeper rungs are left to the
+ *        sigma model's extrapolation, see the eval-sigma-refit-plan).
+ */
+void obf_sigma_scan(Search *search, const char *input_file, const char *output_file, int dmax)
+{
+	FILE *in, *out;
+	char line[128];
+	int id = 0;
+
+	in = fopen(input_file, "r");
+	if (in == NULL) fatal_error("Cannot open sigma-scan input file \"%s\"\n", input_file);
+	out = fopen(output_file, "w");
+	if (out == NULL) fatal_error("Cannot open sigma-scan output file \"%s\"\n", output_file);
+
+	while (fgets(line, sizeof line, in)) {
+		Board board;
+		int player, d, n_empties, max_rung, rung, start_rung;
+		char *next;
+
+		next = parse_board(line, &board, &player);
+		if (next == line || *next != ';') continue;
+		if (parse_int(next + 1, &d) == next + 1) continue;
+
+		++id;
+		n_empties = board_count_empties(&board);
+		max_rung = MIN(d, dmax);
+		start_rung = (d & 1) ? 1 : 2;
+
+		for (rung = 0; rung <= max_rung; rung = (rung == 0 ? start_rung : rung + 2)) {
+			if (rung >= n_empties - 4) continue; // read-to-the-end region, see methodology
+
+			search_cleanup(search);
+			search_set_board(search, &board, player);
+			search->options.depth = rung;
+			search->options.selectivity = NO_SELECTIVITY;
+			search_run(search);
+
+			fprintf(out, "%d %d %d %d\n", id, n_empties, rung, search->result->score);
+		}
+	}
+
+	fclose(in);
+	fclose(out);
 }

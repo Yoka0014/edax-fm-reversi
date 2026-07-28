@@ -13,6 +13,7 @@
 #include "bit.h"
 #include "hash.h"
 #include "options.h"
+#include "sigma_probe.h"
 #include "stats.h"
 #include "ybwc.h"
 #include "settings.h"
@@ -209,6 +210,9 @@ static bool search_probcut(Search *search, const int alpha, const int depth, Nod
 		probcut_depth = 2 * floor(options.probcut_d * depth) + (depth & 1);
 		if (probcut_depth == 0) probcut_depth = depth - 2;
 		assert(probcut_depth > 1 && probcut_depth <= depth - 2 && (probcut_depth & 1) == (depth & 1));
+
+		if (sigma_probe_active) sigma_probe_record(search, depth, probcut_depth);
+
 		probcut_error = t * eval_sigma(search->n_empties, depth, probcut_depth) + 0.5;
 
 		// compute evaluation error (i.e. error at depth 0) averaged for both depths
