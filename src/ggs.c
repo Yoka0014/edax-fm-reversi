@@ -1182,16 +1182,29 @@ static void ui_ggs_play(UI *ui, int turn) {
 	static const char *search_state_array[6] = {"running", "interrupted", "stop pondering", "out of time", "stopped on user demand", "completed"};
 	char search_state[32];
 
-	// Synchro match: never think on both boards at once. Stop any pondering on
-	// both slots so the full task pool is free for this move, and give the
-	// other slot's search full resources (once) the first time the two games
-	// diverge, instead of splitting threads between them.
-	play_stop_pondering(ui->play);
-	play_stop_pondering(ui->play + 1);
-	if (!ui->is_same_play && options.n_task > 1 && search_count_tasks(&ui->play[1].search) != options.n_task) {
+	// Synchro match: never think on both boards at once. Stop pondering on the
+	// slot we are *not* about to use, so the full task pool is free for this
+	// move. The slot we are about to use is deliberately left alone: play_go()
+	// continues its search when the ponder guessed the right move, and stops it
+	// itself otherwise.
+	play_stop_pondering(play == ui->play ? ui->play + 1 : ui->play);
+
+	// The first time the two games diverge, hand slot 1 the tables slot 0 filled
+	// while both games shared the same line, and give it the full task pool
+	// instead of splitting threads between the two boards. Once per match only:
+	// play_new() empties both slots at join time, and re-sharing later would
+	// overwrite what slot 1 has since learnt about its own game. Both searches
+	// must be idle here: resizing frees and reallocates the task stack, and
+	// search_share() reads slot 0's tables without locking them.
+	if (!ui->is_same_play && !ui->is_synchro_shared) {
 		ggs_printf("<synchro match diverged: sequential %d-task search per game (no split)>\n", options.n_task);
-		search_set_task_number(&ui->play[1].search, options.n_task);
+		play_stop_pondering(ui->play);
+		play_stop_pondering(ui->play + 1);
+		if (search_count_tasks(&ui->play[1].search) != options.n_task) {
+			search_set_task_number(&ui->play[1].search, options.n_task);
+		}
 		search_share(&ui->play[0].search, &ui->play[1].search);
+		ui->is_synchro_shared = true;
 	}
 
 	if (!ui->is_same_play && ggs_prev_think_turn != -1 && ggs_prev_think_turn != turn && ggs_prev_think_duration > 0) {
@@ -1296,6 +1309,10 @@ static void ui_ggs_join(UI *ui) {
 		warn("Edax is not concerned by this game\n");
 		return ;
 	}
+
+	// play_new() above emptied this slot's tables, so slot 1 has to inherit
+	// slot 0's again when this match's two games diverge.
+	ui->is_synchro_shared = false;
 
 	// first move or same positions for synchro games or non synchro games => play a single match
 	ui->is_same_play = (ui->ggs->board.move_list_n == 0 || board_equal(&ui->play[0].board, &ui->play[1].board) || !ui->ggs->board.match_type.is_synchro);
@@ -1416,6 +1433,7 @@ void ui_init_ggs(UI *ui) {
 	play_init(ui->play + 1, &ui->book);
 	ui->play[1].search.id = 2;
 	options.n_task = n_task;
+	ui->is_synchro_shared = false;
 	log_open(&ggs_log, options.ggs_log_file);
 
 	ui_login(ui);

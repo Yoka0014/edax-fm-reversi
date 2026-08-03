@@ -2,6 +2,8 @@ bin/
 data/
 doc/
 problem/
+scripts/
+selfplay_data/
 
 *.o
 *.s

@@ -28,6 +28,7 @@ typedef struct UI {
 	Book book;                 /**< Opening book */
 	struct GGSClient *ggs;     /**< GGS Client */
 	bool is_same_play;         /**< true if play[0] == play[1] */
+	bool is_synchro_shared;    /**< true once play[0]'s tables have been handed to play[1] this match */
 	int type;                  /**< type of UI */
 	int mode;                  /**< computer's color mode TODO: remove me*/
 	Event event;               /**< event */
