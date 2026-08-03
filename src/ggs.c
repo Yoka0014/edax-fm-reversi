@@ -1151,13 +1151,7 @@ static void ui_login(UI *ui)
  * @param turn Edax's color.
  */
 static void ui_ggs_ponder(UI *ui, int turn) {
-	Play *play;
-
-	if (search_count_tasks(&ui->play->search) == options.n_task) {
-		play = ui->play;
-	} else  {
-		play = ui->play + turn;
-	}
+	Play *play = ui->is_same_play ? ui->play : ui->play + turn;
 
 	play_ponder(play);
 }
@@ -1170,36 +1164,39 @@ static void ui_ggs_ponder(UI *ui, int turn) {
  * @param ui User Interface.
  * @param turn Edax's color.
  */
+
+/* Synchro match: duration & slot of the think we just finished, so that if the
+ * next call is for the *other* diverged board, we can conservatively assume
+ * its reported clock may be stale by that much (it may have been waiting
+ * behind our blocking play_go()) and deduct it before adjusting the time. */
+static int64_t ggs_prev_think_duration = 0;
+static int ggs_prev_think_turn = -1;
+
 static void ui_ggs_play(UI *ui, int turn) {
 	int64_t real_time = -real_clock();
 	int remaining_time = ui->ggs->board.clock[turn].ini_time;
 	int extra_time = ui->ggs->board.clock[turn].ext_time;
-	Play *play;
+	Play *play = ui->is_same_play ? ui->play : ui->play + turn;
 	Result *result;
 	char move[4], line[32];
 	static const char *search_state_array[6] = {"running", "interrupted", "stop pondering", "out of time", "stopped on user demand", "completed"};
 	char search_state[32];
 
-	if (ui->is_same_play) {
-		play = ui->play;
-		if (search_count_tasks(&ui->play->search) < options.n_task) {
-			ggs_printf("<use a single %d tasks search while a single game is played>\n", options.n_task);
-			play_stop_pondering(ui->play);
-			search_set_task_number(&ui->play[0].search, options.n_task);
-			play_stop_pondering(ui->play + 1);
-			// search_set_task_number(&ui->play[1].search, 0); // 0 is not an allowed value
-		}
-	} else {
-		play = ui->play + turn;
-		if (search_count_tasks(&ui->play->search) == options.n_task && options.n_task > 1) {
-			ggs_printf("<split single %d tasks search into two %d task searches>\n", options.n_task, options.n_task / 2);
-			play_stop_pondering(ui->play);
-			search_set_task_number(&ui->play[0].search, options.n_task / 2);
-			play_stop_pondering(ui->play + 1);
-			search_set_task_number(&ui->play[1].search, options.n_task / 2);
-			search_share(&ui->play[0].search, &ui->play[1].search);
-			ui_ggs_ponder(ui, turn ^ 1); // ponder opponent move
-		}
+	// Synchro match: never think on both boards at once. Stop any pondering on
+	// both slots so the full task pool is free for this move, and give the
+	// other slot's search full resources (once) the first time the two games
+	// diverge, instead of splitting threads between them.
+	play_stop_pondering(ui->play);
+	play_stop_pondering(ui->play + 1);
+	if (!ui->is_same_play && options.n_task > 1 && search_count_tasks(&ui->play[1].search) != options.n_task) {
+		ggs_printf("<synchro match diverged: sequential %d-task search per game (no split)>\n", options.n_task);
+		search_set_task_number(&ui->play[1].search, options.n_task);
+		search_share(&ui->play[0].search, &ui->play[1].search);
+	}
+
+	if (!ui->is_same_play && ggs_prev_think_turn != -1 && ggs_prev_think_turn != turn && ggs_prev_think_duration > 0) {
+		ggs_printf("<synchro: deducting ~%.1fs the other board may have waited>\n", 0.001 * ggs_prev_think_duration);
+		remaining_time -= (int) ggs_prev_think_duration;
 	}
 
 	// game over detection...
@@ -1219,6 +1216,8 @@ static void ui_ggs_play(UI *ui, int turn) {
 	play_go(play, false);
 
 	real_time += real_clock();
+	ggs_prev_think_duration = real_time;
+	ggs_prev_think_turn = turn;
 
 	move_to_string(result->move, play->player, move);
 
