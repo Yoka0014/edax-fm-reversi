@@ -535,7 +535,14 @@ void play_stop_pondering(Play *play)
 
 	info("[play->state=%s]", state[play->state]);
 
-	while (play->state == IS_PONDERING) {
+	// Keep re-asserting the request until the ponder thread acknowledges it:
+	// a single search_stop_all() can be erased by search_run(), which sets
+	// stop = RUNNING as its very first statement. The state test alone is not
+	// enough, as play->state may have been reset behind our back (play_new());
+	// a search left RUNNING is untimed here and thrd_join() would block on it
+	// until it ends by itself.
+	while (play->state == IS_PONDERING
+	   || (play->ponder.launched && play->search.stop == RUNNING)) {
 		info("[stop pondering]\n");
 		search_stop_all(&play->search, STOP_PONDERING);
 		relax(10);
@@ -543,11 +550,6 @@ void play_stop_pondering(Play *play)
 
 	if (play->ponder.launched) {
 		info("[joining thread]\n");
-		if (play->search.stop == RUNNING) {
-			info("[stop running search?]");
-			search_stop_all(&play->search, STOP_PONDERING);
-			relax(10);
-		}
 		thrd_join(play->ponder.thread, NULL);
 		play->ponder.launched = false;
 		info("[thread joined]\n");

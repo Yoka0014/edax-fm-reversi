@@ -1299,20 +1299,38 @@ static void ui_ggs_join(UI *ui) {
 	// set correct played game
 	if (strcmp(ui->ggs->board.player[0].name, ui->ggs->me) == 0) {
 		play = ui->play;
-		play_new(play);
 		edax_turn = BLACK;
 	} else if (strcmp(ui->ggs->board.player[1].name, ui->ggs->me) == 0) {
 		play = ui->play + 1;
-		play_new(play);
 		edax_turn = WHITE;
 	} else {
 		warn("Edax is not concerned by this game\n");
 		return ;
 	}
 
+	// Any running ponderation MUST be stopped before play_new(), which resets
+	// play->state to IS_WAITING: that makes play_stop_pondering() skip the
+	// `while (state == IS_PONDERING)` loop which is the only thing that keeps
+	// re-asserting STOP_PONDERING until the ponder thread acknowledges it (a
+	// single request can be erased by search_run(), which sets stop = RUNNING
+	// as its first statement). It would then go straight to thrd_join() and
+	// block until the untimed ponder search ends by itself -- freezing the
+	// whole GGS client, so every game left on the server runs out of time.
+	// Both slots are stopped: the two joins of a synchro match arrive back to
+	// back and the first one ponders on slot 0 whatever colour Edax has there,
+	// so the second join renews the very slot the first one left pondering.
+	play_stop_pondering(ui->play);
+	play_stop_pondering(ui->play + 1);
+
+	play_new(play);
+
 	// play_new() above emptied this slot's tables, so slot 1 has to inherit
 	// slot 0's again when this match's two games diverge.
 	ui->is_synchro_shared = false;
+
+	// New match: the previous match's think must not be deducted from it.
+	ggs_prev_think_duration = 0;
+	ggs_prev_think_turn = -1;
 
 	// first move or same positions for synchro games or non synchro games => play a single match
 	ui->is_same_play = (ui->ggs->board.move_list_n == 0 || board_equal(&ui->play[0].board, &ui->play[1].board) || !ui->ggs->board.match_type.is_synchro);
