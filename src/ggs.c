@@ -1175,16 +1175,58 @@ static void ui_ggs_ponder(UI *ui, int turn) {
  * @param turn Edax's color.
  */
 
-/* Synchro match: duration & slot of the think we just finished, so that if the
- * next call is for the *other* diverged board, we can conservatively assume
- * its reported clock may be stale by that much (it may have been waiting
- * behind our blocking play_go()) and deduct it before adjusting the time. */
-static int64_t ggs_prev_think_duration = 0;
-static int ggs_prev_think_turn = -1;
+/* What a move costs outside the search: the round trip to the server, and the
+ * time the dispatch loop takes to pick the request up. GGS charges it to the
+ * clock like any other second, and search_time_init() has no notion of it --
+ * it divides the clock the server reported by the moves left to play and
+ * reserves nothing for it.
+ *
+ * That is what runs the clock out. Late in a game the divisor sits at its floor
+ * of two, so the budget is "half of what is left", which can never reach zero.
+ * Add a fixed cost c to every move and it becomes R/2 - c, which has no
+ * positive fixed point: the clock empties in a finite number of moves whatever
+ * it started at. Measured here, c is around 0.4 s., which is some ten seconds
+ * of a one minute game -- against a safety margin of two.
+ *
+ * So measure it and hold it back. What the server charged for a move is the
+ * difference between the clock it reported when it asked for that move and the
+ * clock it reports for the next move on the same board. Those differences
+ * telescope, so GGS's one second resolution bounds the error on the running
+ * total instead of adding up move by move. The estimate is kept across games:
+ * it describes the connection, not the position. It also absorbs any real
+ * waiting behind the other board of a synchro match, since that is charged to
+ * the clock in exactly the same way. */
+static struct {
+	int64_t charged;     /**< clock the server took for the moves measured */
+	int64_t spent;       /**< what those moves spent here */
+	int n;               /**< moves measured */
+	int clock[2];        /**< clock reported at this board's previous move */
+	int64_t last[2];     /**< what that move spent here */
+} ggs_overhead;
+
+/**
+ * @brief Cost of a move outside the search.
+ *
+ * @return measured cost in ms., 0 while there is not enough to go on.
+ */
+static int64_t ggs_overhead_per_move(void)
+{
+	int64_t c;
+
+	// The charges telescope, so the one second resolution costs the running
+	// total a second at worst -- but that is still a second spread over n
+	// moves, so wait for n to make it small. The count is kept across games, so
+	// only the first game of a session is ever unprotected.
+	if (ggs_overhead.n < 8) return 0;
+	c = (ggs_overhead.charged - ggs_overhead.spent) / ggs_overhead.n;
+
+	return c > 0 ? c : 0;
+}
 
 static void ui_ggs_play(UI *ui, int turn) {
 	int64_t real_time = -real_clock();
-	int remaining_time = ui->ggs->board.clock[turn].ini_time;
+	const int reported = ui->ggs->board.clock[turn].ini_time;
+	int remaining_time = reported;
 	int extra_time = ui->ggs->board.clock[turn].ext_time;
 	Play *play = ui->is_same_play ? ui->play : ui->play + turn;
 	Result *result;
@@ -1217,9 +1259,30 @@ static void ui_ggs_play(UI *ui, int turn) {
 		ui->is_synchro_shared = true;
 	}
 
-	if (!ui->is_same_play && ggs_prev_think_turn != -1 && ggs_prev_think_turn != turn && ggs_prev_think_duration > 0) {
-		ggs_printf("<synchro: deducting ~%.1fs the other board may have waited>\n", 0.001 * ggs_prev_think_duration);
-		remaining_time -= (int) ggs_prev_think_duration;
+	// Fold this board's previous move into the estimate. A clock that went *up*
+	// means the game fell into its extra time, which measures nothing: drop the
+	// sample rather than record a negative charge.
+	if (ggs_overhead.clock[turn] > 0) {
+		if (reported <= ggs_overhead.clock[turn]) { // a move too cheap to show charges 0, and belongs in the sum
+			ggs_overhead.charged += ggs_overhead.clock[turn] - reported;
+			ggs_overhead.spent += ggs_overhead.last[turn];
+			++ggs_overhead.n;
+		}
+		ggs_overhead.clock[turn] = 0;
+	}
+
+	// Hold back what the moves still to come will cost outside the search.
+	{
+		const int64_t c = ggs_overhead_per_move();
+		const int moves_left = (board_count_empties(&play->board) + 1) / 2;
+		const int reserve = (int) (c * moves_left);
+
+		if (reserve > 0) {
+			ggs_printf("<clock: game %s, %.1fs reported, holding back %.1fs for %d move%s at %.2fs each>\n",
+				ui->ggs->board.id, 0.001 * remaining_time, 0.001 * reserve,
+				moves_left, moves_left > 1 ? "s" : "", 0.001 * c);
+			remaining_time -= reserve;
+		}
 	}
 
 	// game over detection...
@@ -1239,8 +1302,10 @@ static void ui_ggs_play(UI *ui, int turn) {
 	play_go(play, false);
 
 	real_time += real_clock();
-	ggs_prev_think_duration = real_time;
-	ggs_prev_think_turn = turn;
+
+	// Remember what to compare the next report on this board against.
+	ggs_overhead.clock[turn] = reported;
+	ggs_overhead.last[turn] = real_time;
 
 	move_to_string(result->move, play->player, move);
 
@@ -1338,9 +1403,10 @@ static void ui_ggs_join(UI *ui) {
 	// slot 0's again when this match's two games diverge.
 	ui->is_synchro_shared = false;
 
-	// New match: the previous match's think must not be deducted from it.
-	ggs_prev_think_duration = 0;
-	ggs_prev_think_turn = -1;
+	// New match: this board's clock no longer continues the previous game's, so
+	// the difference between the two would not be a charge. The estimate itself
+	// is deliberately kept -- it describes the connection.
+	ggs_overhead.clock[0] = ggs_overhead.clock[1] = 0;
 
 	// first move or same positions for synchro games or non synchro games => play a single match
 	ui->is_same_play = (ui->ggs->board.move_list_n == 0 || board_equal(&ui->play[0].board, &ui->play[1].board) || !ui->ggs->board.match_type.is_synchro);
