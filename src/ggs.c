@@ -134,11 +134,27 @@ typedef struct GGSAdmin {
 	char name[16];           /**< admin name */
 } GGSAdmin;
 
+/* A run of bytes delivered by one recv(), and when it was delivered.
+ *
+ * The dispatch loop sits inside play_go() for the whole of a search, so the
+ * date a message is *read* says nothing about when it came in -- only the
+ * reader thread can date it. A single date for the whole buffer is not enough
+ * either: a search leaves several messages waiting and they did not all arrive
+ * together, so each run is dated separately and a message takes the date of the
+ * run that completed it. */
+typedef struct GGSChunk {
+	size_t end;                 /**< offset just past this run's last byte */
+	int64_t date;               /**< date recv() returned it */
+} GGSChunk;
+
 /* GGSEvent. Deals with input from ggs */
 typedef struct GGSEvent {
 	int socket;                 /**< socket */
 	bool loop;                  /**< loop */
 	char *buffer;               /**< read buffer */
+	GGSChunk *chunk;            /**< arrival date of every unread run in buffer */
+	int n_chunk;                /**< runs recorded */
+	int max_chunk;              /**< runs the array can hold */
 	thrd_t thread;              /**< thread */
 	mtx_t mutex;                /**< mutex */
 } GGSEvent;
@@ -890,6 +906,74 @@ static bool ggs_password(Text *text)
  * @param v Event.
  * @return NULL.
  */
+/**
+ * @brief Record when a run of bytes arrived.
+ *
+ * Called from the reader thread, with the mutex held.
+ *
+ * @param event Event.
+ * @param end Offset just past the run's last byte.
+ */
+static void ggs_chunk_add(GGSEvent *event, const size_t end)
+{
+	const int64_t now = real_clock();
+
+	// Runs delivered within the same millisecond cannot be told apart, so
+	// extend the last one rather than growing the array through a burst.
+	if (event->n_chunk > 0 && event->chunk[event->n_chunk - 1].date == now) {
+		event->chunk[event->n_chunk - 1].end = end;
+		return;
+	}
+
+	if (event->n_chunk == event->max_chunk) {
+		event->max_chunk = event->max_chunk ? 2 * event->max_chunk : 16;
+		event->chunk = (GGSChunk*) realloc(event->chunk, event->max_chunk * sizeof (GGSChunk));
+		if (event->chunk == NULL) fatal_error("Cannot allocate %d arrival dates\n", event->max_chunk);
+	}
+	event->chunk[event->n_chunk].end = end;
+	event->chunk[event->n_chunk].date = now;
+	++event->n_chunk;
+}
+
+/**
+ * @brief Date of a message just taken out of the buffer, and forget its bytes.
+ *
+ * The date returned is that of the run holding the message's *last* byte: the
+ * message could not have been acted on before the recv() that completed it. A
+ * message read over several calls therefore reports the date of its final
+ * piece, which is that same instant.
+ *
+ * Called with the mutex held, before the buffer is shifted; the offsets still
+ * refer to the buffer as the message was read from it.
+ *
+ * @param event Event.
+ * @param n Number of bytes the message used.
+ * @return Date the message was complete.
+ */
+static int64_t ggs_chunk_take(GGSEvent *event, const size_t n)
+{
+	int64_t date = real_clock(); // no run covers it: unreachable, treat as just in
+	int i, j;
+
+	for (i = 0; i < event->n_chunk; ++i) {
+		if (event->chunk[i].end >= n) {
+			date = event->chunk[i].date;
+			break;
+		}
+	}
+
+	for (i = j = 0; i < event->n_chunk; ++i) {
+		if (event->chunk[i].end > n) { // still holds unread bytes
+			event->chunk[j].end = event->chunk[i].end - n;
+			event->chunk[j].date = event->chunk[i].date;
+			++j;
+		}
+	}
+	event->n_chunk = j;
+
+	return date;
+}
+
 static int ggs_event_loop(void *v)
 {
 	GGSEvent *event = (GGSEvent*) v;
@@ -905,6 +989,7 @@ static int ggs_event_loop(void *v)
 				event->buffer = (char*) realloc(event->buffer, r + l + 1);
 				memcpy(event->buffer + l, buffer, r);
 				event->buffer[l + r] = '\0';
+				ggs_chunk_add(event, (size_t) l + r);
 				*buffer = '\0';
 			mtx_unlock(&event->mutex);
 		} else {
@@ -930,6 +1015,8 @@ static void ggs_event_init(GGSEvent *event)
 	mtx_init(&event->mutex, mtx_plain);
 	event->loop = true;
 	event->buffer = (char*) calloc(1, 1);
+	event->chunk = NULL;
+	event->n_chunk = event->max_chunk = 0;
 
 /* Windows needs this */
 #ifdef _WIN32
@@ -993,6 +1080,7 @@ static void ggs_event_free(GGSEvent *event)
 #endif
 	thrd_join(event->thread, NULL);
 	free(event->buffer);
+	free(event->chunk);
 	mtx_destroy(&event->mutex);
 }
 
@@ -1004,9 +1092,10 @@ static void ggs_event_free(GGSEvent *event)
  *
  * @param event Event.
  * @param text Text.
+ * @param arrival Date the message was received, when one is taken out.
  * @return 'true' if an event occured.
  */
-static bool ggs_event_peek(GGSEvent *event, Text *text)
+static bool ggs_event_peek(GGSEvent *event, Text *text, int64_t *arrival)
 {
 	bool ok = false;
 	const char *s;
@@ -1015,6 +1104,8 @@ static bool ggs_event_peek(GGSEvent *event, Text *text)
 	if (*event->buffer) {
 		s = ggs_parse_text(event->buffer, text);
 		if (s > event->buffer) {
+			const int64_t date = ggs_chunk_take(event, (size_t) (s - event->buffer));
+			if (arrival) *arrival = date;
 			memmove(event->buffer, s, strlen(s) + 1);
 			ok = (*event->buffer != '|');
 		}
@@ -1175,15 +1266,12 @@ static void ui_ggs_ponder(UI *ui, int turn) {
  * @param turn Edax's color.
  */
 
-/* Synchro match: duration & slot of the think we just finished, so that if the
- * next call is for the *other* diverged board, we can conservatively assume
- * its reported clock may be stale by that much (it may have been waiting
- * behind our blocking play_go()) and deduct it before adjusting the time. */
-static int64_t ggs_prev_think_duration = 0;
-static int ggs_prev_think_turn = -1;
+/** date the message being dispatched was received, set by ui_loop_ggs() */
+static int64_t ggs_msg_arrival = 0;
 
 static void ui_ggs_play(UI *ui, int turn) {
 	int64_t real_time = -real_clock();
+	int64_t waited = real_clock() - ggs_msg_arrival;
 	int remaining_time = ui->ggs->board.clock[turn].ini_time;
 	int extra_time = ui->ggs->board.clock[turn].ext_time;
 	Play *play = ui->is_same_play ? ui->play : ui->play + turn;
@@ -1217,9 +1305,16 @@ static void ui_ggs_play(UI *ui, int turn) {
 		ui->is_synchro_shared = true;
 	}
 
-	if (!ui->is_same_play && ggs_prev_think_turn != -1 && ggs_prev_think_turn != turn && ggs_prev_think_duration > 0) {
-		ggs_printf("<synchro: deducting ~%.1fs the other board may have waited>\n", 0.001 * ggs_prev_think_duration);
-		remaining_time -= (int) ggs_prev_think_duration;
+	// The clock the server reported was true when the request arrived, not now:
+	// it has been running ever since, whether Edax was searching this board,
+	// searching the other board of a synchro match, or idle. Deduct the wait
+	// that was actually measured, dated in the reader thread.
+	if (waited < 0) waited = 0; // real_clock() wraps every ~49 days on Windows
+	if (waited > remaining_time) waited = remaining_time;
+	if (waited > 0) {
+		ggs_printf("<clock: game %s, %.1fs reported, waited %.1fs => %.1fs left>\n",
+			ui->ggs->board.id, 0.001 * remaining_time, 0.001 * waited, 0.001 * (remaining_time - waited));
+		remaining_time -= (int) waited;
 	}
 
 	// game over detection...
@@ -1239,8 +1334,6 @@ static void ui_ggs_play(UI *ui, int turn) {
 	play_go(play, false);
 
 	real_time += real_clock();
-	ggs_prev_think_duration = real_time;
-	ggs_prev_think_turn = turn;
 
 	move_to_string(result->move, play->player, move);
 
@@ -1337,10 +1430,6 @@ static void ui_ggs_join(UI *ui) {
 	// play_new() above emptied this slot's tables, so slot 1 has to inherit
 	// slot 0's again when this match's two games diverge.
 	ui->is_synchro_shared = false;
-
-	// New match: the previous match's think must not be deducted from it.
-	ggs_prev_think_duration = 0;
-	ggs_prev_think_turn = -1;
 
 	// first move or same positions for synchro games or non synchro games => play a single match
 	ui->is_same_play = (ui->ggs->board.move_list_n == 0 || board_equal(&ui->play[0].board, &ui->play[1].board) || !ui->ggs->board.match_type.is_synchro);
@@ -1522,7 +1611,7 @@ void ui_loop_ggs(UI *ui) {
 		ggs_client_refresh(client);
 
 		/* look for a ggs event */
-		if (!ggs_event_peek(&client->event, &text)) {
+		if (!ggs_event_peek(&client->event, &text, &ggs_msg_arrival)) {
 			continue;
 		}
 
