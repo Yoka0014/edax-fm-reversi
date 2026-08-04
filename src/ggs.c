@@ -1153,6 +1153,16 @@ static void ui_login(UI *ui)
 static void ui_ggs_ponder(UI *ui, int turn) {
 	Play *play = ui->is_same_play ? ui->play : ui->play + turn;
 
+	// Never leave two searches running at once. Once a synchro match has
+	// diverged both slots own a full task pool, so a ponder started here while
+	// the other slot is still pondering puts 2 * options.n_task threads on the
+	// board -- twice what the tournament allows. ui_ggs_play() already stops
+	// the slot it is not about to use; this is the path that has no such guard.
+	// The two updates that trigger it arrive back to back whenever both games'
+	// echoes were buffered during a search, leaving no ui_ggs_play() in between
+	// to stop the first ponder. Stopping a slot that is not pondering is free.
+	play_stop_pondering(play == ui->play ? ui->play + 1 : ui->play);
+
 	play_ponder(play);
 }
 
