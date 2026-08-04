@@ -433,7 +433,6 @@ void search_init(Search *search)
 	search->options.selectivity = NO_SELECTIVITY;
 	search->options.time = TIME_MAX;
 	search->options.time_per_move = false;
-	search->options.time_share = 1.0;
 	search->options.verbosity = options.verbosity;
 	search->options.keep_date = false;
 	search->options.header = NULL;
@@ -674,26 +673,6 @@ void search_set_move_time(Search *search, const int64_t t)
 }
 
 /**
- * @brief set the share of the alloted time this search may use.
- *
- * The time allocation assumes the engine's clock only runs while it is
- * thinking. When several games are played at once (a GGS synchro match), the
- * engine is to move on more than one board at a time, so all those clocks run
- * together while a single board is searched: one second of thinking then costs
- * one second on each of them. Set the share to 1/(number of running clocks) so
- * the budget is spent at the rate the clocks are actually consumed.
- *
- * This should be called before each new search; it stays set otherwise.
- *
- * @param search Search.
- * @param share fraction of the nominal budget (1.0 = the whole of it).
- */
-void search_set_time_share(Search *search, const double share)
-{
-	search->options.time_share = share;
-}
-
-/**
  * @brief Initialize the alloted time.
  *
  * @param search Search.
@@ -713,12 +692,11 @@ void search_time_init(Search *search)
 		const int sd = solvable_depth(t / 10, search_count_tasks(search)); // depth solvable with 10% of the time
 		const int d = MAX((search->n_empties - sd) / 2, 2); // unsolvable ply to play
 		t = MAX(t / d - 10, 100); // keep 0.25 s./remaining move, make at least 1s. available
-		if (search->options.time_share < 1.0) t = MAX((int64_t) (t * search->options.time_share), 100); // several clocks run at once
 		search->time.extra = t;
 		search->time.maxi = t * 3 / 4;
 		search->time.mini = t / 4;
 		if (search->options.verbosity >= 2) {
-			info("<Time-init: remaining_time = %.2f; solvable_depth = %d; unsolving_plies = %d; share = %.2f => time = %.2f>\n", 0.001 * search->options.time, sd, d, search->options.time_share, 0.001 * t);
+			info("<Time-init: remaining_time = %.2f; solvable_depth = %d; unsolving_plies = %d => time = %.2f>\n", 0.001 * search->options.time, sd, d, 0.001 * t);
 			info("<Time-alloted: mini = %.2f; maxi = %.2f; extra = %.2f>\n", 0.001 * search->time.mini,  0.001 * search->time.maxi,  0.001 * search->time.extra);
 		}
 	}
@@ -752,12 +730,11 @@ void search_time_reset(Search *search, const Board *initial_board)
 		const int sd = solvable_depth(t / 10, search_count_tasks(search)); // depth solvable with 10% of the time
 		const int d = MAX((n_empties - sd) / 2, 2); // unsolvable ply to play
 		t = MAX(t / d - 10, 100); // keep 0.25 s./remaining move, make at least 0.1 s available
-		if (search->options.time_share < 1.0) t = MAX((int64_t) (t * search->options.time_share), 100); // several clocks run at once
 		search->time.extra = spent + t;
 		search->time.maxi = spent + t * 3 / 4;
 		search->time.mini = spent + t / 4;
 		if (search->options.verbosity >= 2) {
-			info("<Time-reset: spent = %.2f remaining = %.2f; solvable_depth = %d; unsolving_plies = %d; share = %.2f => time = %.2f>\n", 0.001 * spent, 0.001 * search->options.time, sd, d, search->options.time_share, 0.001 * t);
+			info("<Time-reset: spent = %.2f remaining = %.2f; solvable_depth = %d; unsolving_plies = %d => time = %.2f>\n", 0.001 * spent, 0.001 * search->options.time, sd, d, 0.001 * t);
 			info("<Time-alloted: mini = %.2f; maxi = %.2f; extra = %.2f>\n", 0.001 * search->time.mini,  0.001 * search->time.maxi,  0.001 * search->time.extra);
 		}
 	}

@@ -108,7 +108,6 @@ typedef struct Search {
 		int selectivity;                          /**< final selectivity */
 		int64_t time;                             /**< time in sec. */
 		bool time_per_move;                       /**< time_per_move or per game ?*/
-		double time_share;                        /**< fraction of the nominal per-move budget this search may use (1.0 = the whole of it; < 1 when other games' clocks run in parallel) */
 		int verbosity;                            /**< verbosity level */
 		bool keep_date;                           /**< keep date */
 		const char *header;                       /**< header for search output */
@@ -150,7 +149,6 @@ void search_resize_hashtable(Search*);
 
 void search_set_game_time(Search*, const int64_t);
 void search_set_move_time(Search*, const int64_t);
-void search_set_time_share(Search*, const double);
 void search_time_init(Search*);
 void search_time_reset(Search*, const Board*);
 void search_adjust_time(Search*, const bool);

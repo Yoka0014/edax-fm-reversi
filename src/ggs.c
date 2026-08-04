@@ -1302,10 +1302,14 @@ static void ui_ggs_play(UI *ui, int turn, int k) {
 	if (remaining_time < 1000) remaining_time = 1000; // set time to at list 1ms
 	play_adjust_time(play, remaining_time, extra_time);
 
-	// The time allocation assumes Edax's clock only runs while it is thinking.
-	// Here 'k' of them run at once, so a second of thinking costs a second on
-	// each: take that fraction of the move's budget.
-	search_set_time_share(&play->search, 1.0 / k);
+	// 'k' is deliberately *not* charged to the budget. The clocks of the other
+	// games run while this one is searched, but that is already paid for: what
+	// they lose shows up in the clock the server reports for their next move,
+	// corrected to now by the wait deducted above. Taking a 1/k share on top of
+	// that charged the same second twice, and cost ~155 Elo on GGS synchro
+	// matches (61% -> 39% over 50 rounds against the stock allocation).
+	// search_time_init() spends a fixed fraction of what is left, so it cannot
+	// run the clock out and has nothing to be protected from here.
 
 	ggs_printf("<ggs: go thinking>\n");
 	play_go(play, false);
@@ -1347,7 +1351,7 @@ static void ui_ggs_play(UI *ui, int turn, int k) {
 			"\\%s plays %s in game %s using %d thread%s"
 			"\\score %s %+02d at %d@%d%% ; PV: %s ;"
 			"\\nodes: %s ; time: search = %.1fs, move = %.1fs; speed: %s."
-			"\\clock: %.1fs reported, %.1fs waited, %.1fs left, %d running (budget share 1/%d)."
+			"\\clock: %.1fs reported, %.1fs waited, %.1fs left, %d running."
 			"\\search %s\n",
 			ui->ggs->me,
 			ui->ggs->me, move, pending->id, search_count_tasks(&play->search), search_count_tasks(&play->search) > 1 ? "s ;" : " ;",
@@ -1355,7 +1359,7 @@ static void ui_ggs_play(UI *ui, int turn, int k) {
 			result->depth, selectivity_table[result->selectivity].percent,
 			line_to_string(&result->pv, 8, " ", line),
 			format_scientific(result->n_nodes, "N", s_nodes), 0.001 * result->time, 0.001 * real_time, format_scientific(result->n_nodes / (0.001 * result->time+ 0.001), "N/s", s_speed),
-			0.001 * pending->clock, 0.001 * waited, 0.001 * remaining_time, k, k,
+			0.001 * pending->clock, 0.001 * waited, 0.001 * remaining_time, k,
 			search_state
 		);
 	}
