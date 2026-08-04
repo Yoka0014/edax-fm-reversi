@@ -141,8 +141,6 @@ typedef struct GGSEvent {
 	char *buffer;               /**< read buffer */
 	thrd_t thread;              /**< thread */
 	mtx_t mutex;                /**< mutex */
-	int64_t arrival;            /**< date the oldest byte still buffered was received */
-	int64_t last_recv;          /**< date of the last recv() */
 } GGSEvent;
 
 /* GGSClient structure */
@@ -904,11 +902,6 @@ static int ggs_event_loop(void *v)
 		if (r > 0) {
 			mtx_lock(&event->mutex);
 				l = strlen(event->buffer);
-				// Date the input here, in the reader thread: ggs_event_peek() runs on
-				// the dispatch loop, which is blocked for the whole of a search, so
-				// the date a message is *read* says nothing about when it arrived.
-				event->last_recv = real_clock();
-				if (l == 0) event->arrival = event->last_recv;
 				event->buffer = (char*) realloc(event->buffer, r + l + 1);
 				memcpy(event->buffer + l, buffer, r);
 				event->buffer[l + r] = '\0';
@@ -937,7 +930,6 @@ static void ggs_event_init(GGSEvent *event)
 	mtx_init(&event->mutex, mtx_plain);
 	event->loop = true;
 	event->buffer = (char*) calloc(1, 1);
-	event->arrival = event->last_recv = real_clock();
 
 /* Windows needs this */
 #ifdef _WIN32
@@ -1012,10 +1004,9 @@ static void ggs_event_free(GGSEvent *event)
  *
  * @param event Event.
  * @param text Text.
- * @param arrival Date the message was received, when one is returned.
  * @return 'true' if an event occured.
  */
-static bool ggs_event_peek(GGSEvent *event, Text *text, int64_t *arrival)
+static bool ggs_event_peek(GGSEvent *event, Text *text)
 {
 	bool ok = false;
 	const char *s;
@@ -1024,13 +1015,7 @@ static bool ggs_event_peek(GGSEvent *event, Text *text, int64_t *arrival)
 	if (*event->buffer) {
 		s = ggs_parse_text(event->buffer, text);
 		if (s > event->buffer) {
-			if (arrival) *arrival = event->arrival;
 			memmove(event->buffer, s, strlen(s) + 1);
-			// What is left arrived no earlier than the message just taken out: the
-			// last recv() is the closest date we have for it. Two messages read from
-			// a single recv() share its date, which is correct: they did arrive
-			// together.
-			if (*event->buffer) event->arrival = event->last_recv;
 			ok = (*event->buffer != '|');
 		}
 	}
@@ -1157,44 +1142,6 @@ static void ui_login(UI *ui)
 	ggs_event_init(&client->event);
 }
 
-/* A move owed on one of the two games of a synchro match, indexed by Edax's
- * colour there. Edax searches a single board at a time, so the request for the
- * other game waits -- with its GGS clock running, since it is Edax's turn on it
- * too. What the server reported is therefore only true as of the moment the
- * message arrived, and has to be corrected by how long the request has been
- * sitting here. The id and the clock are copied because GGSClient holds a
- * single GGSBoard, overwritten by every message that comes in. */
-typedef struct GGSPending {
-	bool active;      /**< a move is owed on this game */
-	char id[32];      /**< GGS game id to answer */
-	int64_t since;    /**< date the request arrived */
-	int clock;        /**< remaining time the server reported at 'since', in ms. */
-	int extra;        /**< extra time the server reported at 'since', in ms. */
-} GGSPending;
-
-static GGSPending ggs_pending[2];
-
-/** colour whose board should be pondered once no move is owed anymore, -1 if none */
-static int ggs_ponder_slot = -1;
-
-/** date the message being dispatched was received */
-static int64_t ggs_msg_arrival;
-
-/**
- * @brief Time left on a pending game's clock, right now.
- *
- * What the server reported was true when the request arrived; the clock has
- * been running ever since, whether Edax was searching this board, searching the
- * other one, or idle.
- *
- * @param pending Pending request.
- * @return remaining time in ms., corrected for how long the request waited.
- */
-static int64_t ggs_pending_time_left(const GGSPending *pending)
-{
-	return pending->clock - (real_clock() - pending->since);
-}
-
 /**
  * @brief ui_ggs_ponder
  *
@@ -1210,59 +1157,30 @@ static void ui_ggs_ponder(UI *ui, int turn) {
 }
 
 /**
- * @brief ui_ggs_request
- *
- * Record that a move is owed on this game.
- *
- * The search is not started here. On a diverged synchro match the other game
- * may be owed a move too, and which one to answer first -- and how much time to
- * give it -- can only be decided once everything already received has been
- * read. See ui_ggs_serve().
- *
- * @param ui User Interface.
- * @param turn Edax's color.
- */
-static void ui_ggs_request(UI *ui, int turn) {
-	GGSPending *const pending = ggs_pending + turn;
-
-	pending->active = true;
-	pending->since = ggs_msg_arrival;
-	pending->clock = ui->ggs->board.clock[turn].ini_time;
-	pending->extra = ui->ggs->board.clock[turn].ext_time;
-	strncpy(pending->id, ui->ggs->board.id, sizeof (pending->id) - 1);
-	pending->id[sizeof (pending->id) - 1] = '\0';
-}
-
-/**
  * @brief ui_ggs_play
  *
  * Search the best move.
  *
  * @param ui User Interface.
  * @param turn Edax's color.
- * @param k Number of Edax clocks running while this move is searched.
  */
 
-static void ui_ggs_play(UI *ui, int turn, int k) {
+/* Synchro match: duration & slot of the think we just finished, so that if the
+ * next call is for the *other* diverged board, we can conservatively assume
+ * its reported clock may be stale by that much (it may have been waiting
+ * behind our blocking play_go()) and deduct it before adjusting the time. */
+static int64_t ggs_prev_think_duration = 0;
+static int ggs_prev_think_turn = -1;
+
+static void ui_ggs_play(UI *ui, int turn) {
 	int64_t real_time = -real_clock();
-	GGSPending *const pending = ggs_pending + turn;
-	const int64_t waited = real_clock() - pending->since;
-	const int64_t time_left = ggs_pending_time_left(pending);
-	int remaining_time = (int) MAX(MIN(time_left, pending->clock), 0);
-	int extra_time = pending->extra;
+	int remaining_time = ui->ggs->board.clock[turn].ini_time;
+	int extra_time = ui->ggs->board.clock[turn].ext_time;
 	Play *play = ui->is_same_play ? ui->play : ui->play + turn;
 	Result *result;
 	char move[4], line[32];
 	static const char *search_state_array[6] = {"running", "interrupted", "stop pondering", "out of time", "stopped on user demand", "completed"};
 	char search_state[32];
-
-	// Clear the request first, so that every way out of this function leaves it
-	// cleared: ui_ggs_serve() loops on the pending boards and would spin forever
-	// on a request nothing ever answers.
-	pending->active = false;
-
-	ggs_printf("<clock: game %s, %.1fs reported, waited %.1fs => %.1fs left; %d clock%s running>\n",
-		pending->id, 0.001 * pending->clock, 0.001 * waited, 0.001 * remaining_time, k, k > 1 ? "s" : "");
 
 	// Synchro match: never think on both boards at once. Stop pondering on the
 	// slot we are *not* about to use, so the full task pool is free for this
@@ -1289,6 +1207,11 @@ static void ui_ggs_play(UI *ui, int turn, int k) {
 		ui->is_synchro_shared = true;
 	}
 
+	if (!ui->is_same_play && ggs_prev_think_turn != -1 && ggs_prev_think_turn != turn && ggs_prev_think_duration > 0) {
+		ggs_printf("<synchro: deducting ~%.1fs the other board may have waited>\n", 0.001 * ggs_prev_think_duration);
+		remaining_time -= (int) ggs_prev_think_duration;
+	}
+
 	// game over detection...
 	if (play_is_game_over(play)) {
 		ggs_client_send(ui->ggs, "tell .%s *** GAME OVER ***\n", ui->ggs->me);
@@ -1302,31 +1225,24 @@ static void ui_ggs_play(UI *ui, int turn, int k) {
 	if (remaining_time < 1000) remaining_time = 1000; // set time to at list 1ms
 	play_adjust_time(play, remaining_time, extra_time);
 
-	// 'k' is deliberately *not* charged to the budget. The clocks of the other
-	// games run while this one is searched, but that is already paid for: what
-	// they lose shows up in the clock the server reports for their next move,
-	// corrected to now by the wait deducted above. Taking a 1/k share on top of
-	// that charged the same second twice, and cost ~155 Elo on GGS synchro
-	// matches (61% -> 39% over 50 rounds against the stock allocation).
-	// search_time_init() spends a fixed fraction of what is left, so it cannot
-	// run the clock out and has nothing to be protected from here.
-
 	ggs_printf("<ggs: go thinking>\n");
 	play_go(play, false);
 
 	real_time += real_clock();
+	ggs_prev_think_duration = real_time;
+	ggs_prev_think_turn = turn;
 
 	move_to_string(result->move, play->player, move);
 
-	ggs_client_send(ui->ggs, "tell /os play %s %s/%d/%.2f\n", pending->id, move, result->score, 0.001 * (real_time + 1));
+	ggs_client_send(ui->ggs, "tell /os play %s %s/%d/%.2f\n", ui->ggs->board.id, move, result->score, 0.001 * (real_time + 1));
 
 	if (result->book_move) {
-		ggs_printf("[%s plays %s in game %s ; score = %d from book]\n", ui->ggs->me, move, pending->id, result->score);
+		ggs_printf("[%s plays %s in game %s ; score = %d from book]\n", ui->ggs->me, move, ui->ggs->board.id, result->score);
 		ggs_client_send(ui->ggs, "tell .%s -----------------------------------------"
 			"\\%s plays %s in game %s"
 			"\\score == %d from book\n",
 			ui->ggs->me,
-			ui->ggs->me, move, pending->id,
+			ui->ggs->me, move, ui->ggs->board.id,
 			result->score
 		);
 	} else if (play->search.n_empties >= 15) { //avoid noisy display
@@ -1338,7 +1254,7 @@ static void ui_ggs_play(UI *ui, int turn, int k) {
 		else bound = "==";
 
 		info("<%s plays %s in game %s ; score = %d at %d@%d%% ; %" PRIu64 " nodes in %.1fs (%.0f nodes/s.)>\n",
-			ui->ggs->me, move, pending->id,
+			ui->ggs->me, move, ui->ggs->board.id,
 			result->score, result->depth, selectivity_table[result->selectivity].percent,
 			result->n_nodes, 0.001 * real_time, (result->n_nodes / (0.001 * real_time + 0.001))
 		);
@@ -1351,56 +1267,16 @@ static void ui_ggs_play(UI *ui, int turn, int k) {
 			"\\%s plays %s in game %s using %d thread%s"
 			"\\score %s %+02d at %d@%d%% ; PV: %s ;"
 			"\\nodes: %s ; time: search = %.1fs, move = %.1fs; speed: %s."
-			"\\clock: %.1fs reported, %.1fs waited, %.1fs left, %d running."
 			"\\search %s\n",
 			ui->ggs->me,
-			ui->ggs->me, move, pending->id, search_count_tasks(&play->search), search_count_tasks(&play->search) > 1 ? "s ;" : " ;",
+			ui->ggs->me, move, ui->ggs->board.id, search_count_tasks(&play->search), search_count_tasks(&play->search) > 1 ? "s ;" : " ;",
 			bound, result->score,
 			result->depth, selectivity_table[result->selectivity].percent,
 			line_to_string(&result->pv, 8, " ", line),
 			format_scientific(result->n_nodes, "N", s_nodes), 0.001 * result->time, 0.001 * real_time, format_scientific(result->n_nodes / (0.001 * result->time+ 0.001), "N/s", s_speed),
-			0.001 * pending->clock, 0.001 * waited, 0.001 * remaining_time, k,
 			search_state
 		);
 	}
-}
-
-/**
- * @brief ui_ggs_serve
- *
- * Answer one of the moves owed, if any.
- *
- * Called once nothing more is waiting to be read, so every request received so
- * far is known and 'k', the number of Edax clocks running at this instant, is a
- * fact rather than a guess. Only one board is served per call: the caller goes
- * back to reading first, so a request that arrived while this search was
- * running is taken into account before the next one is chosen.
- *
- * The board with the least time left is served first. The board served last
- * pays for both searches -- it was waiting during the first one -- so it ends
- * up with less time and is served first next time round. The double charge
- * alternates between the two games by itself, without having to guess how fast
- * the opponent answers.
- *
- * @param ui User Interface.
- */
-static void ui_ggs_serve(UI *ui) {
-	const int k = (int) ggs_pending[0].active + (int) ggs_pending[1].active;
-	int turn;
-
-	if (k == 0) {
-		// Nothing owed: the opponent is thinking, so use the time to ponder.
-		if (ggs_ponder_slot >= 0) {
-			ui_ggs_ponder(ui, ggs_ponder_slot);
-			ggs_ponder_slot = -1;
-		}
-		return ;
-	}
-
-	if (k == 2) turn = ggs_pending_time_left(ggs_pending) <= ggs_pending_time_left(ggs_pending + 1) ? 0 : 1;
-	else turn = ggs_pending[0].active ? 0 : 1;
-
-	ui_ggs_play(ui, turn, k);
 }
 
 /**
@@ -1452,6 +1328,10 @@ static void ui_ggs_join(UI *ui) {
 	// slot 0's again when this match's two games diverge.
 	ui->is_synchro_shared = false;
 
+	// New match: the previous match's think must not be deducted from it.
+	ggs_prev_think_duration = 0;
+	ggs_prev_think_turn = -1;
+
 	// first move or same positions for synchro games or non synchro games => play a single match
 	ui->is_same_play = (ui->ggs->board.move_list_n == 0 || board_equal(&ui->play[0].board, &ui->play[1].board) || !ui->ggs->board.match_type.is_synchro);
 	if (ui->is_same_play) {
@@ -1478,15 +1358,11 @@ static void ui_ggs_join(UI *ui) {
 	if (play->player == edax_turn) {
 		ggs_printf("<My turn>\n");
 		ggs_client_send(ui->ggs, "tell .%s =====================================\n", ui->ggs->me);
-		ui_ggs_request(ui, edax_turn);
-		// Both games on the same line: there is nothing to schedule, so keep
-		// answering message by message as before.
-		if (ui->is_same_play) ui_ggs_play(ui, edax_turn, 1);
+		ui_ggs_play(ui, edax_turn);
+//		ui_ggs_ponder(ui, edax_turn);
 	} else {
 		ggs_printf("[Waiting opponent move]\n");
-		ggs_pending[edax_turn].active = false;
-		if (ui->is_same_play) ui_ggs_ponder(ui, edax_turn);
-		else ggs_ponder_slot = edax_turn;
+		ui_ggs_ponder(ui, edax_turn);
 	}
 }
 
@@ -1546,15 +1422,10 @@ static void ui_ggs_update(UI *ui) {
 	// set time & start thinking
 	if (play->player == edax_turn) {
 		ggs_printf("<My turn>\n");
-		ui_ggs_request(ui, edax_turn);
-		// Both games on the same line: there is nothing to schedule, so keep
-		// answering message by message as before.
-		if (ui->is_same_play) ui_ggs_play(ui, edax_turn, 1);
+		ui_ggs_play(ui, edax_turn);
 	} else {
 		ggs_printf("<Opponent turn>\n");
-		ggs_pending[edax_turn].active = false;
-		if (ui->is_same_play) ui_ggs_ponder(ui, edax_turn);
-		else ggs_ponder_slot = edax_turn;
+		ui_ggs_ponder(ui, edax_turn);
 	}
 }
 
@@ -1641,11 +1512,7 @@ void ui_loop_ggs(UI *ui) {
 		ggs_client_refresh(client);
 
 		/* look for a ggs event */
-		if (!ggs_event_peek(&client->event, &text, &ggs_msg_arrival)) {
-			/* Nothing left to read: every request received so far is known, so
-			   which board to answer -- and how many clocks the answer is charged
-			   to -- can now be decided on facts. */
-			ui_ggs_serve(ui);
+		if (!ggs_event_peek(&client->event, &text)) {
 			continue;
 		}
 
@@ -1684,10 +1551,6 @@ void ui_loop_ggs(UI *ui) {
 		} else if (ggs_match_on(&client->match_on, &text)) {
 			if (ggs_has_player(client->match_on.player, client->me)) {
 				ggs_printf("[received GGS_MATCH_ON]\n");
-				// A new match starts: drop anything left owed on the games of the
-				// previous one, whose match off may never have been seen.
-				ggs_pending[0].active = ggs_pending[1].active = false;
-				ggs_ponder_slot = -1;
 				client->is_playing = true;
 				ggs_client_send(client, "tell /os open 0\n" );
 			} else {
@@ -1698,11 +1561,6 @@ void ui_loop_ggs(UI *ui) {
 		} else if (ggs_match_off(&client->match_off, &text)) {
 			if (ggs_has_player(client->match_off.player, client->me)) {
 				ggs_printf("[received GGS_MATCH_OFF]\n");
-
-				// The match is over: never answer a move owed on a game that no
-				// longer exists.
-				ggs_pending[0].active = ggs_pending[1].active = false;
-				ggs_ponder_slot = -1;
 
 				// store the game in yhe opening book (standard game only)
 				if (!client->match_on.match_type.is_rand) {
